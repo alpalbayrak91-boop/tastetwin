@@ -1,0 +1,119 @@
+const MAX_NETWORK_NODES = 10000;
+const PAGE_DELAY_MS = 350;
+
+chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
+  if (message?.type !== "scanTasteTwin") return;
+  runScan(message.mode === "network" ? "network" : "social")
+    .then((payload) => chrome.runtime.sendMessage({ type: "saveBridge", payload }))
+    .then((result) => {
+      if (!result?.ok) throw new Error(result?.error ?? "Could not send scan to TasteTwin");
+      notify({ state: "complete", payload });
+      sendResponse({ ok: true, payload });
+    })
+    .catch((error) => {
+      notify({ state: "error", message: String(error.message ?? error) });
+      sendResponse({ ok: false, error: String(error.message ?? error) });
+    });
+  return true;
+});
+
+async function runScan(mode) {
+  const handle = currentHandle();
+  if (!handle) throw new Error("Open your Letterboxd profile, Followers, or Following page first.");
+
+  notify({ state: "social", text: "Following taraniyor", current: 0 });
+  const following = await scanList(handle, "following", (progress) => notify({ state: "social", ...progress }));
+  notify({ state: "social", text: "Followers taraniyor", current: 0 });
+  const followers = await scanList(handle, "followers", (progress) => notify({ state: "social", ...progress }));
+  const payload = { handle, following, followers, capturedAt: new Date().toISOString() };
+
+  if (mode === "network") {
+    payload.network = await scanTwoHopNetwork(handle, following);
+  }
+  return payload;
+}
+
+async function scanTwoHopNetwork(owner, directFollowing) {
+  const nodes = new Set([owner, ...directFollowing.map((member) => member.username)]);
+  let edges = directFollowing.length;
+  let capped = false;
+
+  for (let index = 0; index < directFollowing.length; index += 1) {
+    if (nodes.size >= MAX_NETWORK_NODES) {
+      capped = true;
+      break;
+    }
+    const member = directFollowing[index];
+    notify({
+      state: "network",
+      text: `Ag taraniyor: ${member.username}`,
+      current: index + 1,
+      total: directFollowing.length,
+      nodes: nodes.size,
+    });
+    const remaining = MAX_NETWORK_NODES - nodes.size;
+    const theirs = await scanList(member.username, "following", undefined, remaining);
+    edges += theirs.length;
+    for (const next of theirs) nodes.add(next.username);
+  }
+
+  return { nodes: nodes.size, edges, capped, handles: [...nodes] };
+}
+
+async function scanList(handle, relationship, onProgress, maxMembers = Number.POSITIVE_INFINITY) {
+  const members = new Map();
+  const visited = new Set();
+  let url = `/${encodeURIComponent(handle)}/${relationship}/`;
+  let page = 0;
+
+  while (url && members.size < maxMembers) {
+    const absoluteUrl = new URL(url, location.origin).href;
+    if (visited.has(absoluteUrl)) throw new Error(`${relationship} pagination repeated at page ${page + 1}`);
+    visited.add(absoluteUrl);
+    const response = await fetch(url, { credentials: "include" });
+    if (!response.ok) throw new Error(`${relationship} page failed: ${response.status}`);
+    const html = await response.text();
+    if (/Just a moment|Enable JavaScript and cookies to continue/i.test(html)) {
+      throw new Error("Letterboxd asked for a browser challenge. Complete it in the tab, then retry.");
+    }
+    const documentPage = new DOMParser().parseFromString(html, "text/html");
+    for (const member of parseMembers(documentPage)) {
+      members.set(member.username, member);
+      if (members.size >= maxMembers) break;
+    }
+    page += 1;
+    onProgress?.({ text: `${relationship}: ${members.size} kisi`, current: members.size, page });
+    url = documentPage
+      .querySelector('a[rel="next"], .pagination a.next, .paginate-nextprev a.next, .pagination .next a')
+      ?.getAttribute("href") ?? "";
+    if (url) await delay(PAGE_DELAY_MS);
+  }
+
+  return [...members.values()];
+}
+
+function parseMembers(documentPage) {
+  return [...documentPage.querySelectorAll(".member-table .person-summary, main .person-summary")]
+    .map((element) => {
+      const name = element.querySelector("a.name, .person-summary-name a");
+      const href = name?.getAttribute("href") ?? "";
+      const username = href.split("/").filter(Boolean)[0]?.toLowerCase();
+      if (!username || !/^[a-z0-9_-]{2,32}$/.test(username)) return undefined;
+      const avatarUrl = element.querySelector("img")?.src;
+      return { username, displayName: name.textContent.trim() || username, avatarUrl };
+    })
+    .filter(Boolean);
+}
+
+function currentHandle() {
+  const handle = location.pathname.split("/").filter(Boolean)[0]?.toLowerCase();
+  return /^[a-z0-9_-]{2,32}$/.test(handle ?? "") ? handle : "";
+}
+
+function notify(payload) {
+  chrome.runtime.sendMessage({ type: "scanProgress", payload });
+}
+
+function delay(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}

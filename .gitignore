@@ -1,0 +1,11 @@
+node_modules/
+dist/
+*.tsbuildinfo
+vite.config.js
+vite.config.d.ts
+data/
+.codex-test-bridge/
+out/
+.codex-test-desktop-data/
+desktop/server.mjs
+public/brand/tastetwin-icon-source.png

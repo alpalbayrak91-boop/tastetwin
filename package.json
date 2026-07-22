@@ -1,0 +1,39 @@
+{
+  "name": "tastetwin",
+  "private": true,
+  "version": "0.1.0",
+  "productName": "TasteTwin",
+  "description": "Local-first Letterboxd social graph and movie taste matching app.",
+  "author": "TasteTwin",
+  "main": "electron/main.cjs",
+  "type": "module",
+  "scripts": {
+    "dev": "vite --host 127.0.0.1",
+    "package-extension": "node scripts/package-extension.mjs",
+    "build": "npm run package-extension && tsc -b && vite build && node scripts/build-desktop-server.mjs",
+    "desktop": "npm run build && electron-forge start",
+    "make": "npm run build && electron-forge make",
+    "preview": "vite preview --host 127.0.0.1",
+    "start": "node server.mjs"
+  },
+  "dependencies": {
+    "@vitejs/plugin-react": "^4.3.4",
+    "cheerio": "^1.0.0",
+    "fast-xml-parser": "^5.10.1",
+    "jszip": "^3.10.1",
+    "lucide-react": "^0.468.0",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0",
+    "vite": "^6.0.5"
+  },
+  "devDependencies": {
+    "@electron-forge/cli": "^7.11.2",
+    "@electron-forge/maker-squirrel": "^7.11.2",
+    "@types/node": "^22.10.2",
+    "@types/react": "^19.0.2",
+    "@types/react-dom": "^19.0.2",
+    "electron": "^43.2.0",
+    "esbuild": "^0.28.1",
+    "typescript": "^5.7.2"
+  }
+}
