@@ -92,6 +92,18 @@ createServer(async (req, res) => {
       return;
     }
 
+    if (url.pathname === "/api/letterboxd/bridge" && req.method === "DELETE") {
+      const handle = (url.searchParams.get("handle") ?? "").trim().replace(/^@/, "").toLowerCase();
+      if (!/^[a-z0-9_-]{2,32}$/.test(handle)) {
+        sendJson(res, 400, { error: "invalid_handle" });
+        return;
+      }
+      bridgeCache.delete(handle);
+      await persistBridgeCache();
+      sendJson(res, 200, { ok: true, handle });
+      return;
+    }
+
     if (url.pathname === "/api/letterboxd/network") {
       const handle = (url.searchParams.get("handle") ?? "").trim().replace(/^@/, "").toLowerCase();
       const bridged = bridgeCache.get(handle)?.value;

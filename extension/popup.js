@@ -6,7 +6,14 @@ document.querySelector("#network").addEventListener("click", () => start("networ
 
 chrome.runtime.onMessage.addListener((message) => {
   if (message?.type !== "scanProgress") return;
-  const progress = message.payload;
+  renderStatus(message.payload);
+});
+
+chrome.storage.local.get("scanStatus").then(({ scanStatus }) => {
+  if (scanStatus) renderStatus(scanStatus);
+});
+
+function renderStatus(progress) {
   if (progress.state === "complete") {
     status.textContent = `Bitti: ${progress.payload.following.length} takip, ${progress.payload.followers.length} takipci`;
     setBusy(false);
@@ -15,8 +22,9 @@ chrome.runtime.onMessage.addListener((message) => {
     setBusy(false);
   } else {
     status.textContent = progress.text ?? "Taraniyor";
+    setBusy(["starting", "social", "network", "retry"].includes(progress.state));
   }
-});
+}
 
 async function start(mode) {
   setBusy(true);

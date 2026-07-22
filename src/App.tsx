@@ -678,6 +678,9 @@ function SocialPanel({
               ? `${data.source === "official-api" ? "Resmi API" : data.source === "browser-extension" ? "TasteTwin Chrome eklentisi" : data.source === "browser-session" ? "Tam tarayici oturumu" : "Halka acik profil sayfalari"} kullanildi. Takip ettiklerinin son film aktiviteleri zevk eslesmesine alinir.`
               : `${data.source === "official-api" ? "Official API" : data.source === "browser-extension" ? "TasteTwin Chrome extension" : data.source === "browser-session" ? "Full browser session" : "Public profile pages"} used. Recent film activity from your following is used for taste matching.`}
           </p>
+          <p className="muted-line">
+            {language === "tr" ? "Son basarili tarama" : "Last successful scan"}: {new Date(data.checkedAt).toLocaleString(language === "tr" ? "tr-TR" : "en-US")}
+          </p>
         </div>
         <button className="primary-button" onClick={onUseFollowing} disabled={loading}>
           {loading ? <Loader2 className="spin" size={18} /> : <Search size={18} />}

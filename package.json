@@ -1,7 +1,7 @@
 {
   "name": "tastetwin",
   "private": true,
-  "version": "0.1.1",
+  "version": "0.1.2",
   "productName": "TasteTwin",
   "description": "Local-first Letterboxd social graph and movie taste matching app.",
   "author": "TasteTwin",

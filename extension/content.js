@@ -1,5 +1,6 @@
 const MAX_NETWORK_NODES = 10000;
-const PAGE_DELAY_MS = 350;
+const PAGE_DELAY_MS = 1400;
+const RETRY_DELAYS_MS = [5000, 12000, 25000];
 
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   if (message?.type !== "scanTasteTwin") return;
@@ -20,6 +21,9 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
 async function runScan(mode) {
   const handle = currentHandle();
   if (!handle) throw new Error("Open your Letterboxd profile, Followers, or Following page first.");
+
+  const started = await chrome.runtime.sendMessage({ type: "beginScan", handle, mode });
+  if (!started?.ok) throw new Error(started?.error ?? "TasteTwin taramasi baslatilamadi");
 
   notify({ state: "social", text: "Following taraniyor", current: 0 });
   const following = await scanList(handle, "following", (progress) => notify({ state: "social", ...progress }));
@@ -70,8 +74,7 @@ async function scanList(handle, relationship, onProgress, maxMembers = Number.PO
     const absoluteUrl = new URL(url, location.origin).href;
     if (visited.has(absoluteUrl)) throw new Error(`${relationship} pagination repeated at page ${page + 1}`);
     visited.add(absoluteUrl);
-    const response = await fetch(url, { credentials: "include" });
-    if (!response.ok) throw new Error(`${relationship} page failed: ${response.status}`);
+    const response = await fetchPage(url, relationship);
     const html = await response.text();
     if (/Just a moment|Enable JavaScript and cookies to continue/i.test(html)) {
       throw new Error("Letterboxd asked for a browser challenge. Complete it in the tab, then retry.");
@@ -112,6 +115,20 @@ function currentHandle() {
 
 function notify(payload) {
   chrome.runtime.sendMessage({ type: "scanProgress", payload });
+}
+
+async function fetchPage(url, relationship) {
+  for (let attempt = 0; attempt <= RETRY_DELAYS_MS.length; attempt += 1) {
+    const response = await fetch(url, { credentials: "include", cache: "no-store" });
+    if (response.ok) return response;
+    if (![403, 429].includes(response.status) || attempt === RETRY_DELAYS_MS.length) {
+      throw new Error(`${relationship} page failed: ${response.status}`);
+    }
+    const waitMs = RETRY_DELAYS_MS[attempt];
+    notify({ state: "retry", text: `Letterboxd ${response.status} verdi; ${Math.ceil(waitMs / 1000)} saniye sonra tekrar deneniyor` });
+    await delay(waitMs);
+  }
+  throw new Error(`${relationship} page failed`);
 }
 
 function delay(ms) {
