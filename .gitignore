@@ -7,5 +7,6 @@ data/
 .codex-test-bridge/
 out/
 .codex-test-desktop-data/
+.codex-artifacts/
 desktop/server.mjs
 public/brand/tastetwin-icon-source.png

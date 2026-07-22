@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "TasteTwin Letterboxd Scanner",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Scans your visible Letterboxd social graph and sends it to your local TasteTwin app.",
   "icons": {
     "16": "icons/icon-16.png",

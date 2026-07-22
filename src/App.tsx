@@ -2,7 +2,7 @@ import {
   BarChart3,
   Clapperboard,
   Copy,
-  ExternalLink,
+  Download,
   FileUp,
   Film,
   Filter,
@@ -27,8 +27,6 @@ import { buildMatches, buildRecommendations, decadeTerms, getStats, topTerms } f
 import type { FilmSignal, Language, MatchResult, UserTaste } from "./types";
 
 type Tab = "overview" | "matches" | "social" | "profile";
-
-const EXTENSION_PATH = "C:\\Users\\morte\\OneDrive\\Belgeler\\lb\\extension";
 
 type SocialMember = {
   id?: string;
@@ -90,7 +88,6 @@ export default function App() {
   const [socialLoading, setSocialLoading] = useState(false);
   const [socialByHandle, setSocialByHandle] = useState<Record<string, SocialData>>(loadStoredSocial);
   const [copied, setCopied] = useState(false);
-  const [scannerCopied, setScannerCopied] = useState(false);
   const [storageReady, setStorageReady] = useState(false);
 
   const uploadedUser = users.find((user) => user.source === "upload");
@@ -162,38 +159,20 @@ export default function App() {
         const ownPayload = await ownResponse.json();
         target = ownPayload.users?.[0] as UserTaste | undefined;
       }
-      const candidateHandles = payload.following.map((member) => member.username).slice(0, 120);
-      const response = candidateHandles.length
-        ? await fetch(`/api/letterboxd/rss?handles=${encodeURIComponent(candidateHandles.join(","))}`)
-        : undefined;
-      const candidatePayload = response ? await response.json() : { users: [] };
-      const candidates = (candidatePayload.users ?? []) as UserTaste[];
       if (target) {
-        setUsers([target, ...candidates.filter((user) => user.id !== target?.id)]);
+        setUsers((current) => [target, ...current.filter((user) => user.id !== target?.id)]);
         setActiveId(target.id);
       }
       setStatus(
         language === "tr"
-          ? `Tam tarama geldi: ${payload.counts.following} takip, ${payload.counts.followers} takipci.`
-          : `Full scan received: ${payload.counts.following} following, ${payload.counts.followers} followers.`,
+          ? `Tam tarama geldi: ${payload.counts.following} takip, ${payload.counts.followers} takipci. Sosyal sekmesinden tum takip ettiklerini eslestirebilirsin.`
+          : `Full scan received: ${payload.counts.following} following, ${payload.counts.followers} followers. Match all following from the Social tab.`,
       );
     }
 
     window.addEventListener("message", receiveBrowserScan);
     return () => window.removeEventListener("message", receiveBrowserScan);
   }, [language, uploadedUser]);
-
-  async function copyBrowserScanner() {
-    await navigator.clipboard.writeText(EXTENSION_PATH);
-    setScannerCopied(true);
-    setStatus(
-      language === "tr"
-        ? "Eklenti klasoru kopyalandi. Chrome'da chrome://extensions acilacak. Sag ustten Gelistirici modu'nu ac, Paketlenmemis oge yukle ile kopyalanan klasoru sec."
-        : "Extension folder copied. Chrome extensions will open. Enable Developer mode, choose Load unpacked, then select the copied folder.",
-    );
-    window.open("chrome://extensions", "_blank");
-    window.setTimeout(() => setScannerCopied(false), 1800);
-  }
 
   async function handleUpload(file?: File) {
     if (!file) return;
@@ -242,21 +221,14 @@ export default function App() {
         target = ownPayload.users?.[0] as UserTaste | undefined;
       }
 
-      const candidateHandles = enriched.following.map((member) => member.username).slice(0, 120);
-      const candidateResponse = candidateHandles.length
-        ? await fetch(`/api/letterboxd/rss?handles=${encodeURIComponent(candidateHandles.join(","))}`)
-        : undefined;
-      const candidatePayload = candidateResponse ? await candidateResponse.json() : { users: [], errors: [] };
-      const candidates = (candidatePayload.users ?? []) as UserTaste[];
       if (target) {
-        setUsers([target, ...candidates.filter((user) => user.id !== target?.id)]);
+        setUsers((current) => [target, ...current.filter((user) => user.id !== target?.id)]);
         setActiveId(target.id);
       }
-      const failed = candidatePayload.errors?.length ?? 0;
       setStatus(
         language === "tr"
-          ? `${enriched.counts.following} takip, ${enriched.counts.followers} takipci bulundu. ${candidates.length} kisinin son film aktivitesi eslesmeye alindi${failed ? `, ${failed} hesap alinamadi` : ""}.`
-          : `${enriched.counts.following} following and ${enriched.counts.followers} followers found. Recent film activity loaded for ${candidates.length} people${failed ? `; ${failed} accounts failed` : ""}.`,
+          ? `${enriched.counts.following} takip, ${enriched.counts.followers} takipci bulundu. Sosyal sekmesindeki Eslestir dugmesi tum takip ettiklerini sirayla isleyecek.`
+          : `${enriched.counts.following} following and ${enriched.counts.followers} followers found. Match processes every account in order from the Social tab.`,
       );
     } catch (error) {
       console.error(error);
@@ -270,7 +242,7 @@ export default function App() {
     const handle = accountHandle || activeUser?.handle || "";
     const social = socialByHandle[handle];
     if (!social?.available) return;
-    const followingHandles = social.following.map((member) => member.username).slice(0, 120);
+    const followingHandles = social.following.map((member) => member.username);
     await fetchProfilesForHandles(followingHandles);
   }
 
@@ -280,10 +252,19 @@ export default function App() {
     setLoading(true);
     setStatus("");
     try {
-      const response = await fetch(`/api/letterboxd/network?handle=${encodeURIComponent(handle)}&limit=120`);
-      const payload = await response.json();
-      if (!response.ok) throw new Error(payload.error ?? "network_not_scanned");
-      await fetchProfilesForHandles(payload.handles as string[]);
+      const handles: string[] = [];
+      let offset = 0;
+      let total = 0;
+      do {
+        const response = await fetch(`/api/letterboxd/network?handle=${encodeURIComponent(handle)}&offset=${offset}&limit=120`);
+        const payload = await response.json();
+        if (!response.ok) throw new Error(payload.error ?? "network_not_scanned");
+        handles.push(...(payload.handles as string[]));
+        total = payload.total as number;
+        offset = payload.nextOffset ?? total;
+        setStatus(language === "tr" ? `Ag listesi aliniyor: ${handles.length}/${total}` : `Loading network list: ${handles.length}/${total}`);
+      } while (offset < total);
+      await fetchProfilesForHandles(handles);
     } catch (error) {
       console.error(error);
       setStatus(language === "tr" ? "Ag taramasi bulunamadi. Chrome eklentisinden ag haritasini calistir." : "Network scan not found. Run the network map in the Chrome extension.");
@@ -295,10 +276,24 @@ export default function App() {
     setLoading(true);
     setStatus("");
     try {
-      const response = await fetch(`/api/letterboxd/rss?handles=${encodeURIComponent(cleanHandles.join(","))}`);
-      const payload = await response.json();
-      if (!response.ok) throw new Error(payload.error ?? "fetch_failed");
-      const fetched = payload.users as UserTaste[];
+      const handles = [...new Set(cleanHandles.map((handle) => handle.trim().replace(/^@/, "").toLowerCase()).filter(Boolean))];
+      if (!handles.length) throw new Error("handles_required");
+      const fetched: UserTaste[] = [];
+      let failed = 0;
+      const batchSize = 60;
+      for (let offset = 0; offset < handles.length; offset += batchSize) {
+        const batch = handles.slice(offset, offset + batchSize);
+        setStatus(
+          language === "tr"
+            ? `Film aktiviteleri aliniyor: ${offset}/${handles.length}`
+            : `Loading film activity: ${offset}/${handles.length}`,
+        );
+        const response = await fetch(`/api/letterboxd/rss?handles=${encodeURIComponent(batch.join(","))}`);
+        const payload = await response.json();
+        if (!response.ok) throw new Error(payload.error ?? "fetch_failed");
+        fetched.push(...((payload.users ?? []) as UserTaste[]));
+        failed += payload.errors?.length ?? 0;
+      }
       const currentUpload = users.find((user) => user.source === "upload");
       const nextUsers = [
         ...users.filter((user) => user.source !== "rss"),
@@ -309,8 +304,8 @@ export default function App() {
       setTab(currentUpload ? "matches" : "overview");
       setStatus(
         language === "tr"
-          ? `${fetched.length} takip adayi cekildi${payload.errors?.length ? `, ${payload.errors.length} hesap alinamadi` : ""}. Adaylarda RSS son aktiviteleri verir.`
-          : `${fetched.length} follow candidates loaded${payload.errors?.length ? `; ${payload.errors.length} accounts failed` : ""}. Candidate RSS contains recent activity.`,
+          ? `${handles.length} adayin tamami denendi; ${fetched.length} kisinin film aktivitesi alindi${failed ? `, ${failed} hesap alinamadi` : ""}.`
+          : `All ${handles.length} candidates were attempted; film activity loaded for ${fetched.length}${failed ? `; ${failed} accounts failed` : ""}.`,
       );
     } catch (error) {
       console.error(error);
@@ -374,34 +369,18 @@ export default function App() {
             {socialLoading ? <Loader2 className="spin" size={18} /> : <Link2 size={18} />}
             <span>{language === "tr" ? "Hesabi ve takipleri cek" : "Load account and follows"}</span>
           </button>
-          <button className="browser-scan-button" onClick={copyBrowserScanner}>
-            <Globe2 size={17} />
-            <span>
-              {scannerCopied
-                ? language === "tr"
-                  ? "Kopyalandi"
-                  : "Copied"
-                : language === "tr"
-                  ? "Chrome eklentisini yukle"
-                  : "Install Chrome extension"}
-            </span>
-          </button>
+          <a className="browser-scan-button" href="/tastetwin-extension.zip" download="tastetwin-extension.zip">
+            <Download size={17} />
+            <span>{language === "tr" ? "1. Eklenti ZIP'ini indir" : "1. Download extension ZIP"}</span>
+          </a>
           <div className="extension-help">
             <strong>{language === "tr" ? "Eklenti kurulumu" : "Extension setup"}</strong>
             <ol>
-              <li>{language === "tr" ? "Butona bas: klasor yolu kopyalanir ve Chrome uzantilar sayfasi acilir." : "Press the button: it copies the folder path and opens Chrome extensions."}</li>
-              <li>{language === "tr" ? "Sag ustte Gelistirici modu anahtarini ac." : "Turn on the Developer mode switch at the top right."}</li>
-              <li>{language === "tr" ? "Paketlenmemis oge yukle / Load unpacked ile bu klasoru sec." : "Use Load unpacked and select this folder."}</li>
+              <li>{language === "tr" ? "Indirdigin ZIP'e sag tikla, Tumunu ayikla de." : "Right-click the downloaded ZIP and extract all files."}</li>
+              <li>{language === "tr" ? "Chrome adres cubuguna chrome://extensions yaz; Gelistirici modu'nu ac." : "Open chrome://extensions and enable Developer mode."}</li>
+              <li>{language === "tr" ? "Paketlenmemis oge yukle / Load unpacked ile ayiklanan klasoru sec." : "Choose Load unpacked and select the extracted folder."}</li>
             </ol>
-            <code>{EXTENSION_PATH}</code>
-            <a className="mini-link" href="/open-chrome-extensions.cmd" download>
-              <ExternalLink size={14} />
-              <span>{language === "tr" ? "Chrome uzantilar sayfasini acan yardimci" : "Helper that opens Chrome extensions"}</span>
-            </a>
-            <a className="mini-link" href="/tastetwin-extension.zip" download>
-              <FileUp size={14} />
-              <span>{language === "tr" ? "Baska bilgisayar icin eklenti ZIP" : "Extension ZIP for another computer"}</span>
-            </a>
+            <code>chrome://extensions</code>
           </div>
         </div>
 
@@ -486,8 +465,8 @@ export default function App() {
               <h1>{language === "tr" ? "Letterboxd hesabini bagla" : "Connect your Letterboxd account"}</h1>
               <p>
                 {language === "tr"
-                  ? "Kullanici adini yazinca takip/takipci listesi otomatik gelir. 900 filme yakin tam arsivin icin Letterboxd export ZIP'ini de yukle."
-                  : "Enter your handle to load following and followers automatically. Upload your Letterboxd export ZIP for your full library."}
+                  ? "Once Benim export ile Letterboxd ZIP'ini yukle. Eklentiyi kurup kendi profilinde sosyal taramayi calistir. Sonra Sosyal sekmesinde tum takip ettiklerinle eslestir."
+                  : "First upload your Letterboxd ZIP with My export. Install the extension and scan your own profile, then match everyone you follow from Social."}
               </p>
             </div>
           </section>
@@ -711,8 +690,8 @@ function SocialPanel({
             <h2>{language === "tr" ? "Iki halkali ag" : "Two-hop network"}</h2>
             <p className="muted-line">
               {language === "tr"
-                ? `${data.network.nodes} hesap, ${data.network.edges} bag bulundu${data.network.capped ? "; 10.000 sinirina ulasti" : ""}. Ilk 120 ag adayinin son aktiviteleriyle eslestir.`
-                : `${data.network.nodes} accounts and ${data.network.edges} edges found${data.network.capped ? "; reached the 10,000 cap" : ""}. Match against recent activity from the first 120 network candidates.`}
+              ? `${data.network.nodes} hesap, ${data.network.edges} bag bulundu${data.network.capped ? "; 10.000 tarama sinirina ulasti" : ""}. Tum ag adaylari sirayla denenir; buyuk aglar uzun surebilir.`
+              : `${data.network.nodes} accounts and ${data.network.edges} edges found${data.network.capped ? "; reached the 10,000 scan limit" : ""}. Every network candidate is attempted in order; large networks can take a while.`}
             </p>
           </div>
           <button className="primary-button" onClick={onUseNetwork} disabled={loading}>

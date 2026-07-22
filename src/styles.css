@@ -171,6 +171,7 @@ button:hover,
   background: var(--panel);
   color: var(--ink);
   font-weight: 800;
+  text-decoration: none;
 }
 
 .browser-scan-button:hover {

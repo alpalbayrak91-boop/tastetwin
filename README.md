@@ -18,6 +18,15 @@ TasteTwin is a local-first Letterboxd social graph and movie taste matching app.
 4. Open `chrome://extensions`, enable Developer mode, and choose Load unpacked.
 5. Select the extracted extension folder.
 
+## First use
+
+1. Export your data from Letterboxd and load the downloaded ZIP with **My export**.
+2. Keep TasteTwin open, visit your own Letterboxd profile, and run the social scan from the extension.
+3. Return to TasteTwin, load your account, then choose **Match** in the Social tab.
+4. Run the two-hop network scan separately when needed; large networks can take a long time.
+
+Following and network candidates are processed in batches. TasteTwin attempts the full scanned list instead of stopping after the first 120 accounts.
+
 Windows may show an unknown publisher warning until the installer is code-signed.
 
 ## Development
