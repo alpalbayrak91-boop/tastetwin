@@ -194,7 +194,7 @@ export default function App() {
     }
   }
 
-  async function fetchSocialData() {
+  async function fetchSocialData(source: "extension" | "public" = "extension") {
     const handle = (accountHandle || activeUser?.handle || "").trim().replace(/^@/, "").toLowerCase();
     if (!/^[a-z0-9_-]{2,32}$/.test(handle)) {
       setStatus(language === "tr" ? "Gecerli Letterboxd kullanici adini yaz" : "Enter a valid Letterboxd handle");
@@ -204,11 +204,25 @@ export default function App() {
     setSocialLoading(true);
     setStatus("");
     try {
-      const response = await fetch(`/api/letterboxd/social?handle=${encodeURIComponent(handle)}`);
+      const response = await fetch(`/api/letterboxd/social?handle=${encodeURIComponent(handle)}&source=${source}`);
       const payload = (await response.json()) as SocialData;
-      if (!response.ok || !payload.available) throw new Error("social_fetch_failed");
+      if (!response.ok || !payload.available) {
+        const errorCode = "error" in payload ? payload.error : "social_fetch_failed";
+        throw new Error(errorCode);
+      }
       const enriched = addFollowerChanges(handle, payload);
-      setSocialByHandle((current) => ({ ...current, [handle]: enriched }));
+      setSocialByHandle((current) => {
+        const existing = current[handle];
+        if (
+          source === "public" &&
+          existing?.available &&
+          existing.complete &&
+          ["browser-extension", "browser-session", "official-api"].includes(existing.source)
+        ) {
+          return current;
+        }
+        return { ...current, [handle]: enriched };
+      });
       setTab("social");
 
       let target = uploadedUser;
@@ -227,12 +241,27 @@ export default function App() {
       }
       setStatus(
         language === "tr"
-          ? `${enriched.counts.following} takip, ${enriched.counts.followers} takipci bulundu. Sosyal sekmesindeki Eslestir dugmesi tum takip ettiklerini sirayla isleyecek.`
-          : `${enriched.counts.following} following and ${enriched.counts.followers} followers found. Match processes every account in order from the Social tab.`,
+          ? source === "extension"
+            ? `Eklentiden ${enriched.counts.following} takip, ${enriched.counts.followers} takipci alindi.`
+            : enriched.complete
+              ? `Halka acik kontrolde ${enriched.counts.following} takip, ${enriched.counts.followers} takipci bulundu.`
+              : `Halka acik kontrol yalnizca ${enriched.counts.following}/${enriched.counts.followers} hesap gorebildi; bu kismi sonuc tam eklenti verisinin yerine gecmez.`
+          : source === "extension"
+            ? `Loaded ${enriched.counts.following} following and ${enriched.counts.followers} followers from the extension.`
+            : `Public check found ${enriched.counts.following}/${enriched.counts.followers}; partial results never replace a complete extension scan.`,
       );
     } catch (error) {
       console.error(error);
-      setStatus(language === "tr" ? "Sosyal veri cekilemedi" : "Could not fetch social data");
+      const extensionMissing = error instanceof Error && error.message === "extension_scan_required";
+      setStatus(
+        language === "tr"
+          ? extensionMissing
+            ? "Kayitli eklenti taramasi yok. Letterboxd profilinde eklentinin 1 numarali sosyal taramasini tamamla."
+            : "Sosyal veri cekilemedi"
+          : extensionMissing
+            ? "No extension scan is saved. Complete scan 1 from your Letterboxd profile."
+            : "Could not fetch social data",
+      );
     } finally {
       setSocialLoading(false);
     }
@@ -362,12 +391,16 @@ export default function App() {
             placeholder="kullaniciadi"
             onChange={(event) => setAccountHandle(event.target.value)}
             onKeyDown={(event) => {
-              if (event.key === "Enter") fetchSocialData();
+              if (event.key === "Enter") fetchSocialData("extension");
             }}
           />
-          <button className="primary-button" onClick={fetchSocialData} disabled={socialLoading || loading}>
+          <button className="primary-button" onClick={() => fetchSocialData("extension")} disabled={socialLoading || loading}>
             {socialLoading ? <Loader2 className="spin" size={18} /> : <Link2 size={18} />}
-            <span>{language === "tr" ? "Hesabi ve takipleri cek" : "Load account and follows"}</span>
+            <span>{language === "tr" ? "Eklenti taramasini al" : "Load extension scan"}</span>
+          </button>
+          <button className="browser-scan-button" onClick={() => fetchSocialData("public")} disabled={socialLoading || loading}>
+            <Globe2 size={17} />
+            <span>{language === "tr" ? "Hizli acik kontrol (eksik olabilir)" : "Quick public check (may be partial)"}</span>
           </button>
           <a className="browser-scan-button" href="/tastetwin-extension.zip" download="tastetwin-extension.zip">
             <Download size={17} />
@@ -386,7 +419,7 @@ export default function App() {
 
         <label className="upload-button" title={t(language, "import")}>
           <FileUp size={18} />
-          <span>{language === "tr" ? "Benim export" : "My export"}</span>
+          <span>{language === "tr" ? "Tam film arsivi ZIP" : "Full film archive ZIP"}</span>
           <input type="file" accept=".zip,.csv,text/csv" onChange={(event) => handleUpload(event.target.files?.[0])} />
         </label>
 
@@ -534,7 +567,7 @@ export default function App() {
                 language={language}
                 data={socialByHandle[accountHandle || activeUser.handle]}
                 loading={socialLoading || loading}
-                onFetch={fetchSocialData}
+                onFetch={() => fetchSocialData("extension")}
                 onUseFollowing={useFollowingAsMatchCandidates}
                 onUseNetwork={useNetworkAsMatchCandidates}
               />

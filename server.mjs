@@ -61,11 +61,24 @@ createServer(async (req, res) => {
     if (url.pathname === "/api/letterboxd/social") {
       const startedAt = Date.now();
       const handle = (url.searchParams.get("handle") ?? "").trim().replace(/^@/, "");
+      const requestedSource = url.searchParams.get("source") ?? "extension";
       if (!handle) {
         sendJson(res, 400, { error: "handle_required" });
         return;
       }
-      const social = await fetchLetterboxdSocial(handle);
+      let social;
+      if (requestedSource === "extension") {
+        social = bridgeCache.get(handle.toLowerCase())?.value;
+        if (!social) {
+          sendJson(res, 404, { error: "extension_scan_required" });
+          return;
+        }
+      } else if (requestedSource === "public") {
+        social = await fetchPublicSocial(handle.toLowerCase());
+      } else {
+        sendJson(res, 400, { error: "invalid_source" });
+        return;
+      }
       console.log("[social] complete", {
         handle,
         source: social.source,

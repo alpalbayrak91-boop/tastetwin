@@ -5,8 +5,8 @@ const RETRY_DELAYS_MS = [5000, 12000, 25000];
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   if (message?.type !== "scanTasteTwin") return;
   runScan(message.mode === "network" ? "network" : "social")
-    .then((payload) => chrome.runtime.sendMessage({ type: "saveBridge", payload }))
-    .then((result) => {
+    .then(async (payload) => ({ payload, result: await chrome.runtime.sendMessage({ type: "saveBridge", payload }) }))
+    .then(({ payload, result }) => {
       if (!result?.ok) throw new Error(result?.error ?? "Could not send scan to TasteTwin");
       notify({ state: "complete", payload });
       sendResponse({ ok: true, payload });
