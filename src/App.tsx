@@ -381,6 +381,25 @@ export default function App() {
           </div>
         </div>
 
+        <nav className="tabs" aria-label={language === "tr" ? "Gorunum secenekleri" : "View options"}>
+          <button className={tab === "overview" ? "active" : ""} onClick={() => setTab("overview")}>
+            <BarChart3 size={18} />
+            <span>{t(language, "navOverview")}</span>
+          </button>
+          <button className={tab === "matches" ? "active" : ""} onClick={() => setTab("matches")}>
+            <Users size={18} />
+            <span>{t(language, "navMatches")}</span>
+          </button>
+          <button className={tab === "social" ? "active" : ""} onClick={() => setTab("social")}>
+            <UserCheck size={18} />
+            <span>{language === "tr" ? "Sosyal ag" : "Social graph"}</span>
+          </button>
+          <button className={tab === "profile" ? "active" : ""} onClick={() => setTab("profile")}>
+            <Globe2 size={18} />
+            <span>{t(language, "navProfile")}</span>
+          </button>
+        </nav>
+
         <div className="live-box">
           <label className="field-label" htmlFor="account-handle">
             {language === "tr" ? "Letterboxd kullanici adin" : "Your Letterboxd handle"}
@@ -467,25 +486,6 @@ export default function App() {
             EN
           </button>
         </div>
-
-        <nav className="tabs" aria-label="main">
-          <button className={tab === "overview" ? "active" : ""} onClick={() => setTab("overview")}>
-            <BarChart3 size={18} />
-            <span>{t(language, "navOverview")}</span>
-          </button>
-          <button className={tab === "matches" ? "active" : ""} onClick={() => setTab("matches")}>
-            <Users size={18} />
-            <span>{t(language, "navMatches")}</span>
-          </button>
-          <button className={tab === "social" ? "active" : ""} onClick={() => setTab("social")}>
-            <UserCheck size={18} />
-            <span>{language === "tr" ? "Sosyal" : "Social"}</span>
-          </button>
-          <button className={tab === "profile" ? "active" : ""} onClick={() => setTab("profile")}>
-            <Globe2 size={18} />
-            <span>{t(language, "navProfile")}</span>
-          </button>
-        </nav>
 
         {status && <p className="status-line">{status}</p>}
       </aside>

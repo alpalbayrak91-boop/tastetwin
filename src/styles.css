@@ -78,6 +78,10 @@ button:hover,
   display: flex;
   flex-direction: column;
   gap: 18px;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
 }
 
 .brand-row {

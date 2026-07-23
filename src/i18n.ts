@@ -3,9 +3,9 @@ import type { Language } from "./types";
 export const copy = {
   tr: {
     appName: "TasteTwin",
-    navOverview: "Panel",
-    navMatches: "Eşleşmeler",
-    navProfile: "Kart",
+    navOverview: "Film paneli",
+    navMatches: "Zevk eşleşmeleri",
+    navProfile: "Paylaşım kartı",
     import: "Export yükle",
     demo: "Demo",
     reset: "Sıfırla",
@@ -45,9 +45,9 @@ export const copy = {
   },
   en: {
     appName: "TasteTwin",
-    navOverview: "Panel",
-    navMatches: "Matches",
-    navProfile: "Card",
+    navOverview: "Film dashboard",
+    navMatches: "Taste matches",
+    navProfile: "Share card",
     import: "Import export",
     demo: "Demo",
     reset: "Reset",
