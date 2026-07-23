@@ -6,15 +6,20 @@
     <title>TasteTwin Scanner</title>
     <style>
       body { width: 300px; margin: 0; padding: 16px; color: #172a2e; background: #f7f5ef; font: 14px/1.4 system-ui, sans-serif; }
-      h1 { margin: 0 0 6px; font-size: 18px; } p { color: #587076; } button { width: 100%; margin-top: 8px; padding: 10px; border: 0; border-radius: 6px; color: #fff; background: #172a2e; font: inherit; font-weight: 700; cursor: pointer; } button.secondary { color: #172a2e; background: #dce9e7; } button:disabled { opacity: .6; cursor: wait; } #status { min-height: 38px; margin-top: 12px; color: #0e766e; font-weight: 650; }
+      h1 { margin: 0 0 6px; font-size: 18px; } p { color: #587076; } button { width: 100%; margin-top: 8px; padding: 10px; border: 0; border-radius: 6px; color: #fff; background: #172a2e; font: inherit; font-weight: 700; cursor: pointer; } button.secondary { color: #172a2e; background: #dce9e7; } button:disabled { opacity: .6; cursor: wait; } #status { min-height: 24px; margin-top: 12px; color: #0e766e; font-weight: 650; } .disclosure { margin: 10px 0; padding: 9px; border: 1px solid #cadbd8; border-radius: 6px; background: #fff; color: #405a60; font-size: 12px; } .last-scan { margin-top: 10px; padding-top: 10px; border-top: 1px solid #d7d4cc; } .last-scan strong { display: block; color: #172a2e; } .last-scan span { display: block; margin-top: 3px; color: #587076; font-size: 12px; }
     </style>
   </head>
   <body>
     <h1>TasteTwin Scanner</h1>
     <p>TasteTwin uygulamasi acikken kendi Letterboxd profilinde calistir. Sifre istemez.</p>
+    <div class="disclosure">Yalnizca actigin Letterboxd profilindeki takip ve takipci kullanici adlarini okur. Sonuc bu bilgisayardaki TasteTwin'e gider; sifre ve cerez aktarilmaz.</div>
     <button id="social">1. Takipci ve takip edilenleri tara</button>
     <button id="network" class="secondary">2. 10.000 kisilik agi haritala</button>
     <div id="status">Hazir</div>
+    <div id="last-scan" class="last-scan">
+      <strong>Son basarili tarama</strong>
+      <span>Henuz tarama yok.</span>
+    </div>
     <script src="popup.js"></script>
   </body>
 </html>
