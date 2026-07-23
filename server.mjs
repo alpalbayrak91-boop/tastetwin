@@ -126,10 +126,15 @@ createServer(async (req, res) => {
       }
       const offset = Math.max(0, Number.parseInt(url.searchParams.get("offset") ?? "0", 10) || 0);
       const limit = Math.min(120, Math.max(1, Number.parseInt(url.searchParams.get("limit") ?? "120", 10) || 120));
+      const candidates = bridged.networkCandidates?.length
+        ? bridged.networkCandidates
+        : bridged.networkHandles.map((username) => ({ username, displayName: username }));
+      const page = candidates.slice(offset, offset + limit);
       sendJson(res, 200, {
-        total: bridged.networkHandles.length,
-        handles: bridged.networkHandles.slice(offset, offset + limit),
-        nextOffset: offset + limit < bridged.networkHandles.length ? offset + limit : undefined,
+        total: candidates.length,
+        handles: page.map((member) => member.username),
+        members: page,
+        nextOffset: offset + limit < candidates.length ? offset + limit : undefined,
       });
       return;
     }
@@ -253,6 +258,21 @@ function socialFromExtension(payload) {
         edges: social.network?.edges ?? 0,
         capped: Boolean(network.capped),
       };
+    }
+    if (Array.isArray(network.candidates) && network.candidates.length <= 10000) {
+      const rawByHandle = new Map(
+        network.candidates.map((candidate) => [String(candidate?.username ?? "").toLowerCase(), candidate]),
+      );
+      social.networkCandidates = normalizeBridgeMembers(network.candidates)
+        .map((member) => ({
+          ...member,
+          connections: Math.max(
+            1,
+            Math.min(10000, Number.parseInt(rawByHandle.get(member.username)?.connections, 10) || 1),
+          ),
+        }))
+        .sort((a, b) => b.connections - a.connections || a.username.localeCompare(b.username));
+      social.networkHandles = social.networkCandidates.map((member) => member.username);
     }
   }
   return social;
@@ -627,7 +647,7 @@ async function restoreBridgeCache() {
         followers: raw.followers,
         capturedAt: raw.checkedAt,
         network: Array.isArray(raw.networkHandles)
-          ? { ...raw.network, handles: [handle, ...raw.networkHandles] }
+          ? { ...raw.network, handles: raw.networkHandles, candidates: raw.networkCandidates }
           : undefined,
       });
       value.checkedAt = typeof entry.value.checkedAt === "string" ? entry.value.checkedAt : value.checkedAt;

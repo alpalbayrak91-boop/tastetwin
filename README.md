@@ -8,6 +8,8 @@ TasteTwin is a local-first Letterboxd social graph and movie taste matching app.
 - Reads following and follower lists through the companion Chrome extension.
 - Finds mutuals, non-followers, new followers, and lost followers.
 - Compares the imported archive with recent public RSS activity from other members.
+- Defaults matching to people outside your current following list.
+- Opens each match into a rated common-film and divergence breakdown.
 - Keeps imported and scanned data on the user's computer.
 
 ## Install on Windows
@@ -22,10 +24,10 @@ TasteTwin is a local-first Letterboxd social graph and movie taste matching app.
 
 1. Export your data from Letterboxd and load the downloaded ZIP with **My export**.
 2. Keep TasteTwin open, visit your own Letterboxd profile, and run the social scan from the extension.
-3. Return to TasteTwin, load your account, then choose **Match** in the Social tab.
-4. Run the two-hop network scan separately when needed; large networks can take a long time.
+3. Return to TasteTwin and use **People I do not follow** in Taste matches.
+4. Run the optional two-hop network scan to discover candidates outside your following list. Choose how many ranked candidates should have their RSS activity checked.
 
-Following and network candidates are processed in batches. TasteTwin attempts the full scanned list instead of stopping after the first 120 accounts.
+Network candidates are ranked by how often they appear across the following lists that were scanned. RSS matching is processed in small batches and the result count is user-controlled, so the interface remains usable during large calculations.
 
 Windows may show an unknown publisher warning until the installer is code-signed.
 
@@ -47,6 +49,8 @@ The installer is written to `out/make/squirrel.windows/x64/TasteTwin-Setup.exe`.
 ## Data limits
 
 The account owner gets full-history analysis from their own Letterboxd export. Other members are compared using recent public RSS activity unless they also provide an export. TasteTwin does not claim that RSS is a member's complete viewing history.
+
+The optional network scanner is experimental, can take a long time, and may be blocked by Letterboxd. Review Letterboxd's current terms before using automated network collection.
 
 ## Privacy
 

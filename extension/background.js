@@ -44,7 +44,6 @@ async function resendLastScan() {
 }
 
 async function beginScan(handle, mode) {
-  await chrome.storage.local.remove("lastScan");
   await chrome.storage.local.set({
     scanStatus: {
       state: "starting",
@@ -53,9 +52,6 @@ async function beginScan(handle, mode) {
       updatedAt: new Date().toISOString(),
     },
   });
-  await fetch(`http://127.0.0.1:5173/api/letterboxd/bridge?handle=${encodeURIComponent(handle)}`, {
-    method: "DELETE",
-  }).catch(() => undefined);
 }
 
 async function sendToTasteTwin(payload) {

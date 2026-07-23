@@ -3,6 +3,7 @@ import { createRequire } from "node:module";
 const require = createRequire(import.meta.url);
 const { chromium } = require("playwright");
 const screenshotPath = process.env.TASTETWIN_SCREENSHOT ?? "tastetwin-verified.png";
+const appUrl = process.env.TASTETWIN_APP_URL ?? "http://127.0.0.1:5173/";
 const browser = await chromium.launch({ headless: true });
 const page = await browser.newPage({ viewport: { width: 1440, height: 1000 } });
 const consoleErrors = [];
@@ -12,7 +13,7 @@ page.on("console", (message) => {
 });
 page.on("pageerror", (error) => consoleErrors.push(error.message));
 
-await page.goto("http://127.0.0.1:5173/", { waitUntil: "networkidle" });
+await page.goto(appUrl, { waitUntil: "networkidle" });
 await page.evaluate(async () => {
   localStorage.clear();
   await new Promise((resolve) => {
@@ -62,6 +63,7 @@ await page.evaluate(async () => {
     id: "rss-candidate",
     handle: "candidate",
     displayName: "Candidate",
+    avatarUrl: "/brand/tastetwin-icon.png",
     importedAt: new Date().toISOString(),
     source: "rss",
     films: [...owner.films.slice(0, 3), ...extras],
@@ -105,10 +107,18 @@ await page.evaluate(async () => {
 
 await page.reload({ waitUntil: "networkidle" });
 await page.locator(".tabs button").nth(1).click();
+await page.locator(".match-card").first().waitFor();
 const coverage = await page.locator(".coverage-line").first().innerText();
 const score = Number(await page.locator(".radial-score strong").first().innerText());
 if (!coverage.includes("20 filmden 3")) throw new Error(`Unexpected coverage text: ${coverage}`);
 if (score > 60) throw new Error(`Low-evidence score is still too high: ${score}`);
+await page.locator(".match-card").first().click();
+await page.locator(".match-dialog").waitFor();
+const commonRows = await page.locator(".match-dialog .rating-row:not(.rating-head)").count();
+if (commonRows !== 3) throw new Error(`Expected 3 rated common-film rows, found ${commonRows}`);
+if ((await page.locator(".match-card .profile-avatar").count()) === 0) throw new Error("Match avatar missing");
+await page.screenshot({ path: screenshotPath.replace(/\.png$/i, "-detail.png") });
+await page.locator(".match-dialog .dialog-actions button").click();
 
 await page.locator(".tabs button").nth(2).click();
 await page.locator(".social-list").first().waitFor();
@@ -129,5 +139,5 @@ const overlay = await page.locator("vite-error-overlay, .vite-error-overlay, #we
 if (overlay) throw new Error("Framework error overlay is visible");
 if (consoleErrors.length) throw new Error(`Console errors: ${consoleErrors.join(" | ")}`);
 
-console.log(JSON.stringify({ archiveAfterReload: 900, coverage, score, socialTotal: 135, mobileOverflow: overflow }));
+console.log(JSON.stringify({ archiveAfterReload: 900, coverage, score, commonRows, socialTotal: 135, mobileOverflow: overflow }));
 await browser.close();

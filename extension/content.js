@@ -39,6 +39,8 @@ async function runScan(mode) {
 
 async function scanTwoHopNetwork(owner, directFollowing) {
   const nodes = new Set([owner, ...directFollowing.map((member) => member.username)]);
+  const directHandles = new Set([owner, ...directFollowing.map((member) => member.username)]);
+  const candidates = new Map();
   let edges = directFollowing.length;
   let capped = false;
 
@@ -58,10 +60,29 @@ async function scanTwoHopNetwork(owner, directFollowing) {
     const remaining = MAX_NETWORK_NODES - nodes.size;
     const theirs = await scanList(member.username, "following", undefined, remaining);
     edges += theirs.length;
-    for (const next of theirs) nodes.add(next.username);
+    for (const next of theirs) {
+      nodes.add(next.username);
+      if (directHandles.has(next.username)) continue;
+      const current = candidates.get(next.username);
+      candidates.set(next.username, {
+        ...next,
+        connections: (current?.connections ?? 0) + 1,
+        avatarUrl: current?.avatarUrl || next.avatarUrl,
+        displayName: current?.displayName || next.displayName,
+      });
+    }
   }
 
-  return { nodes: nodes.size, edges, capped, handles: [...nodes] };
+  const rankedCandidates = [...candidates.values()].sort(
+    (a, b) => b.connections - a.connections || a.username.localeCompare(b.username),
+  );
+  return {
+    nodes: nodes.size,
+    edges,
+    capped,
+    handles: rankedCandidates.map((candidate) => candidate.username),
+    candidates: rankedCandidates,
+  };
 }
 
 async function scanList(handle, relationship, onProgress, maxMembers = Number.POSITIVE_INFINITY) {

@@ -22,6 +22,7 @@ export type UserTaste = {
   id: string;
   handle: string;
   displayName: string;
+  avatarUrl?: string;
   importedAt: string;
   source: "rss" | "upload";
   films: FilmSignal[];
@@ -33,6 +34,7 @@ export type MatchResult = {
   confidence: number;
   candidateFilmCount: number;
   commonCount: number;
+  commonFilms: Array<{ film: FilmSignal; targetRating?: number; candidateRating?: number }>;
   sharedLoves: FilmSignal[];
   sharedDislikes: FilmSignal[];
   divergences: Array<{ film: FilmSignal; targetRating?: number; candidateRating?: number }>;

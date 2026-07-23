@@ -3,6 +3,7 @@ import {
   Clapperboard,
   Copy,
   Download,
+  ExternalLink,
   FileUp,
   Film,
   Filter,
@@ -18,15 +19,17 @@ import {
   UserCheck,
   UserMinus,
   Users,
+  X,
 } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import { t } from "./i18n";
 import { readLetterboxdExport } from "./lib/letterboxd";
 import { clearPersistentState, loadPersistentState, savePersistentState } from "./lib/storage";
-import { buildMatches, buildRecommendations, decadeTerms, getStats, topTerms } from "./lib/taste";
+import { buildMatchesAsync, buildRecommendations, decadeTerms, getStats, topTerms } from "./lib/taste";
 import type { FilmSignal, Language, MatchResult, UserTaste } from "./types";
 
 type Tab = "overview" | "matches" | "social" | "profile";
+type MatchScope = "discover" | "following" | "all";
 
 type SocialMember = {
   id?: string;
@@ -82,6 +85,13 @@ export default function App() {
   const [activeId, setActiveId] = useState(() => localStorage.getItem("tastetwin.active") ?? "");
   const [accountHandle, setAccountHandle] = useState(() => localStorage.getItem("tastetwin.handle") ?? "");
   const [minCommon, setMinCommon] = useState(1);
+  const [minScore, setMinScore] = useState(0);
+  const [matchLimit, setMatchLimit] = useState(50);
+  const [networkCandidateLimit, setNetworkCandidateLimit] = useState(250);
+  const [matchScope, setMatchScope] = useState<MatchScope>("discover");
+  const [matches, setMatches] = useState<MatchResult[]>([]);
+  const [matchProgress, setMatchProgress] = useState("");
+  const [selectedMatch, setSelectedMatch] = useState<MatchResult>();
   const [requireDislike, setRequireDislike] = useState(false);
   const [status, setStatus] = useState("");
   const [loading, setLoading] = useState(false);
@@ -95,14 +105,75 @@ export default function App() {
   const activeUser = users.find((user) => user.id === activeId) ?? users[0];
   const currentSocial = socialByHandle[accountHandle || activeUser?.handle || ""];
   const stats = useMemo(() => (activeUser ? getStats(activeUser) : undefined), [activeUser]);
-  const matches = useMemo(() => (activeUser ? buildMatches(activeUser, users) : []), [activeUser, users]);
-  const filteredMatches = matches.filter(
-    (match) => match.commonCount >= minCommon && (!requireDislike || match.sharedDislikes.length > 0),
+  const followingHandles = useMemo(
+    () =>
+      new Set(
+        currentSocial?.available
+          ? currentSocial.following.map((member) => member.username.toLowerCase())
+          : [],
+      ),
+    [currentSocial],
+  );
+  const avatarByHandle = useMemo(() => {
+    const avatars = new Map<string, string>();
+    if (!currentSocial?.available) return avatars;
+    for (const member of [...currentSocial.following, ...currentSocial.followers]) {
+      if (member.avatarUrl) avatars.set(member.username.toLowerCase(), member.avatarUrl);
+    }
+    return avatars;
+  }, [currentSocial]);
+  const matchCandidates = useMemo(() => {
+    if (!activeUser) return [];
+    return users.filter((user) => {
+      if (user.id === activeUser.id) return false;
+      const followed = followingHandles.has(user.handle.toLowerCase());
+      if (matchScope === "discover") return !followed;
+      if (matchScope === "following") return followed;
+      return true;
+    });
+  }, [activeUser, followingHandles, matchScope, users]);
+  const filteredMatches = useMemo(
+    () =>
+      matches
+        .filter(
+          (match) =>
+            match.score >= minScore &&
+            match.commonCount >= minCommon &&
+            (!requireDislike || match.sharedDislikes.length > 0),
+        )
+        .slice(0, matchLimit),
+    [matchLimit, matches, minCommon, minScore, requireDislike],
   );
   const recommendations = useMemo(() => (activeUser ? buildRecommendations(activeUser, matches) : []), [activeUser, matches]);
   const genreTerms = useMemo(() => (activeUser ? topTerms(activeUser, "genres") : []), [activeUser]);
   const directorTerms = useMemo(() => (activeUser ? topTerms(activeUser, "directors", 4) : []), [activeUser]);
   const decadeData = useMemo(() => (activeUser ? decadeTerms(activeUser) : []), [activeUser]);
+
+  useEffect(() => {
+    let cancelled = false;
+    if (!activeUser || !matchCandidates.length) {
+      setMatches([]);
+      setMatchProgress("");
+      return;
+    }
+    setMatchProgress(language === "tr" ? "Eslestirmeler hesaplaniyor..." : "Calculating matches...");
+    void buildMatchesAsync(activeUser, [activeUser, ...matchCandidates], (completed, total) => {
+      if (!cancelled) {
+        setMatchProgress(
+          language === "tr"
+            ? `Eslestirmeler hesaplaniyor: ${completed}/${total}`
+            : `Calculating matches: ${completed}/${total}`,
+        );
+      }
+    }).then((results) => {
+      if (cancelled) return;
+      setMatches(results);
+      setMatchProgress("");
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [activeUser, language, matchCandidates]);
 
   useEffect(() => {
     let cancelled = false;
@@ -272,7 +343,8 @@ export default function App() {
     const social = socialByHandle[handle];
     if (!social?.available) return;
     const followingHandles = social.following.map((member) => member.username);
-    await fetchProfilesForHandles(followingHandles);
+    setMatchScope("following");
+    await fetchProfilesForHandles(followingHandles, social.following);
   }
 
   async function useNetworkAsMatchCandidates() {
@@ -282,18 +354,31 @@ export default function App() {
     setStatus("");
     try {
       const handles: string[] = [];
+      const members: SocialMember[] = [];
       let offset = 0;
       let total = 0;
       do {
-        const response = await fetch(`/api/letterboxd/network?handle=${encodeURIComponent(handle)}&offset=${offset}&limit=120`);
+        const remaining = networkCandidateLimit > 0 ? networkCandidateLimit - handles.length : 120;
+        const pageSize = networkCandidateLimit > 0 ? Math.min(120, Math.max(1, remaining)) : 120;
+        const response = await fetch(`/api/letterboxd/network?handle=${encodeURIComponent(handle)}&offset=${offset}&limit=${pageSize}`);
         const payload = await response.json();
         if (!response.ok) throw new Error(payload.error ?? "network_not_scanned");
         handles.push(...(payload.handles as string[]));
+        members.push(...((payload.members ?? []) as SocialMember[]));
         total = payload.total as number;
         offset = payload.nextOffset ?? total;
         setStatus(language === "tr" ? `Ag listesi aliniyor: ${handles.length}/${total}` : `Loading network list: ${handles.length}/${total}`);
-      } while (offset < total);
-      await fetchProfilesForHandles(handles);
+      } while (offset < total && (networkCandidateLimit === 0 || handles.length < networkCandidateLimit));
+      const directFollowing = new Set(
+        socialByHandle[handle]?.available
+          ? socialByHandle[handle].following.map((member) => member.username.toLowerCase())
+          : [],
+      );
+      const discoveries = handles.filter(
+        (candidate) => candidate !== handle.toLowerCase() && !directFollowing.has(candidate.toLowerCase()),
+      );
+      setMatchScope("discover");
+      await fetchProfilesForHandles(discoveries, members);
     } catch (error) {
       console.error(error);
       setStatus(language === "tr" ? "Ag taramasi bulunamadi. Chrome eklentisinden ag haritasini calistir." : "Network scan not found. Run the network map in the Chrome extension.");
@@ -301,12 +386,13 @@ export default function App() {
     }
   }
 
-  async function fetchProfilesForHandles(cleanHandles: string[]) {
+  async function fetchProfilesForHandles(cleanHandles: string[], members: SocialMember[] = []) {
     setLoading(true);
     setStatus("");
     try {
       const handles = [...new Set(cleanHandles.map((handle) => handle.trim().replace(/^@/, "").toLowerCase()).filter(Boolean))];
       if (!handles.length) throw new Error("handles_required");
+      const memberByHandle = new Map(members.map((member) => [member.username.toLowerCase(), member]));
       const fetched: UserTaste[] = [];
       let failed = 0;
       const batchSize = 60;
@@ -320,7 +406,16 @@ export default function App() {
         const response = await fetch(`/api/letterboxd/rss?handles=${encodeURIComponent(batch.join(","))}`);
         const payload = await response.json();
         if (!response.ok) throw new Error(payload.error ?? "fetch_failed");
-        fetched.push(...((payload.users ?? []) as UserTaste[]));
+        fetched.push(
+          ...((payload.users ?? []) as UserTaste[]).map((user) => {
+            const member = memberByHandle.get(user.handle.toLowerCase());
+            return {
+              ...user,
+              displayName: member?.displayName || user.displayName,
+              avatarUrl: member?.avatarUrl || user.avatarUrl,
+            };
+          }),
+        );
         failed += payload.errors?.length ?? 0;
       }
       const currentUpload = users.find((user) => user.source === "upload");
@@ -532,16 +627,49 @@ export default function App() {
               <section className="view-stack">
                 <div className="filter-band">
                   <Filter size={18} />
+                  <div className="scope-control" aria-label={language === "tr" ? "Aday havuzu" : "Candidate pool"}>
+                    <button className={matchScope === "discover" ? "active" : ""} onClick={() => setMatchScope("discover")}>
+                      {language === "tr" ? "Takip etmediklerim" : "Not followed"}
+                    </button>
+                    <button className={matchScope === "following" ? "active" : ""} onClick={() => setMatchScope("following")}>
+                      {language === "tr" ? "Takip ettiklerim" : "Following"}
+                    </button>
+                    <button className={matchScope === "all" ? "active" : ""} onClick={() => setMatchScope("all")}>
+                      {language === "tr" ? "Tumu" : "All"}
+                    </button>
+                  </div>
                   <label>
                     {t(language, "minCommon")}
                     <input
                       type="range"
                       min="0"
-                      max="8"
+                      max="25"
                       value={minCommon}
                       onChange={(event) => setMinCommon(Number(event.target.value))}
                     />
                     <strong>{minCommon}</strong>
+                  </label>
+                  <label>
+                    {language === "tr" ? "En az skor" : "Minimum score"}
+                    <input
+                      type="range"
+                      min="0"
+                      max="95"
+                      step="5"
+                      value={minScore}
+                      onChange={(event) => setMinScore(Number(event.target.value))}
+                    />
+                    <strong>{minScore}</strong>
+                  </label>
+                  <label>
+                    {language === "tr" ? "Sonuc" : "Results"}
+                    <select value={matchLimit} onChange={(event) => setMatchLimit(Number(event.target.value))}>
+                      {[20, 50, 100, 250].map((limit) => (
+                        <option value={limit} key={limit}>
+                          {limit}
+                        </option>
+                      ))}
+                    </select>
                   </label>
                   <label className="check-label">
                     <input
@@ -553,9 +681,21 @@ export default function App() {
                   </label>
                 </div>
 
+                <p className="match-summary">
+                  {matchProgress ||
+                    (language === "tr"
+                      ? `${matchCandidates.length} adaydan ${filteredMatches.length} eslesme gosteriliyor. Kartin ustune tiklayarak puanli ortak filmleri ac.`
+                      : `Showing ${filteredMatches.length} matches from ${matchCandidates.length} candidates. Select a card for rated film evidence.`)}
+                </p>
                 <div className="match-list">
                   {filteredMatches.map((match) => (
-                    <MatchCard key={match.user.id} language={language} match={match} />
+                    <MatchCard
+                      key={match.user.id}
+                      language={language}
+                      match={match}
+                      avatarUrl={match.user.avatarUrl || avatarByHandle.get(match.user.handle.toLowerCase())}
+                      onSelect={() => setSelectedMatch(match)}
+                    />
                   ))}
                   {!filteredMatches.length && <p className="empty-state">{t(language, "emptyMatches")}</p>}
                 </div>
@@ -570,6 +710,8 @@ export default function App() {
                 onFetch={() => fetchSocialData("extension")}
                 onUseFollowing={useFollowingAsMatchCandidates}
                 onUseNetwork={useNetworkAsMatchCandidates}
+                networkCandidateLimit={networkCandidateLimit}
+                onNetworkCandidateLimitChange={setNetworkCandidateLimit}
               />
             )}
 
@@ -607,6 +749,14 @@ export default function App() {
           </>
         )}
       </main>
+      {selectedMatch && (
+        <MatchDetail
+          language={language}
+          match={selectedMatch}
+          avatarUrl={selectedMatch.user.avatarUrl || avatarByHandle.get(selectedMatch.user.handle.toLowerCase())}
+          onClose={() => setSelectedMatch(undefined)}
+        />
+      )}
     </div>
   );
 }
@@ -648,6 +798,8 @@ function SocialPanel({
   onFetch,
   onUseFollowing,
   onUseNetwork,
+  networkCandidateLimit,
+  onNetworkCandidateLimitChange,
 }: {
   language: Language;
   data?: SocialData;
@@ -655,6 +807,8 @@ function SocialPanel({
   onFetch: () => void;
   onUseFollowing: () => void;
   onUseNetwork: () => void;
+  networkCandidateLimit: number;
+  onNetworkCandidateLimitChange: (value: number) => void;
 }) {
   if (!data) {
     return (
@@ -726,14 +880,28 @@ function SocialPanel({
             <h2>{language === "tr" ? "Iki halkali ag" : "Two-hop network"}</h2>
             <p className="muted-line">
               {language === "tr"
-              ? `${data.network.nodes} hesap, ${data.network.edges} bag bulundu${data.network.capped ? "; 10.000 tarama sinirina ulasti" : ""}. Tum ag adaylari sirayla denenir; buyuk aglar uzun surebilir.`
-              : `${data.network.nodes} accounts and ${data.network.edges} edges found${data.network.capped ? "; reached the 10,000 scan limit" : ""}. Every network candidate is attempted in order; large networks can take a while.`}
+              ? `${data.network.nodes} hesap, ${data.network.edges} bag bulundu${data.network.capped ? "; 10.000 dugume ulasti" : ""}. Zaten takip ettiklerin cikarilir; ortak bag sayisi yuksek kesif adaylari once denenir.`
+              : `${data.network.nodes} accounts and ${data.network.edges} edges found${data.network.capped ? "; reached 10,000 nodes" : ""}. Existing follows are excluded and highly connected discoveries are tried first.`}
             </p>
           </div>
-          <button className="primary-button" onClick={onUseNetwork} disabled={loading}>
-            {loading ? <Loader2 className="spin" size={18} /> : <Search size={18} />}
-            <span>{language === "tr" ? "Agdan eslestir" : "Match network"}</span>
-          </button>
+          <div className="network-match-controls">
+            <label>
+              {language === "tr" ? "Dene" : "Try"}
+              <select
+                value={networkCandidateLimit}
+                onChange={(event) => onNetworkCandidateLimitChange(Number(event.target.value))}
+              >
+                {[100, 250, 500, 1000].map((limit) => (
+                  <option value={limit} key={limit}>{limit}</option>
+                ))}
+                <option value={0}>{language === "tr" ? "Tumu" : "All"}</option>
+              </select>
+            </label>
+            <button className="primary-button" onClick={onUseNetwork} disabled={loading}>
+              {loading ? <Loader2 className="spin" size={18} /> : <Search size={18} />}
+              <span>{language === "tr" ? "Takip etmedigim kisileri bul" : "Find people I do not follow"}</span>
+            </button>
+          </div>
         </div>
       )}
       <div className="stats-grid social-stats">
@@ -952,7 +1120,17 @@ function RecommendationPanel({
   );
 }
 
-function MatchCard({ language, match }: { language: Language; match: MatchResult }) {
+function MatchCard({
+  language,
+  match,
+  avatarUrl,
+  onSelect,
+}: {
+  language: Language;
+  match: MatchResult;
+  avatarUrl?: string;
+  onSelect: () => void;
+}) {
   const reasons = reasonLines(match, language);
   const confidenceLabel =
     match.confidence >= 70
@@ -967,11 +1145,22 @@ function MatchCard({ language, match }: { language: Language; match: MatchResult
           ? "dusuk veri guveni"
           : "low data confidence";
   return (
-    <article className="match-card">
+    <article
+      className="match-card"
+      role="button"
+      tabIndex={0}
+      onClick={onSelect}
+      onKeyDown={(event) => {
+        if (event.key === "Enter" || event.key === " ") onSelect();
+      }}
+    >
       <div className="match-head">
-        <div>
-          <h2>{match.user.displayName}</h2>
-          <span>@{match.user.handle}</span>
+        <div className="match-person">
+          <Avatar name={match.user.displayName} src={avatarUrl} />
+          <div>
+            <h2>{match.user.displayName}</h2>
+            <span>@{match.user.handle}</span>
+          </div>
         </div>
         <div className="radial-score" style={{ "--score": `${match.score}%` } as React.CSSProperties}>
           <strong>{match.score}</strong>
@@ -1000,12 +1189,133 @@ function MatchCard({ language, match }: { language: Language; match: MatchResult
 
       {match.togetherPick && (
         <div className="together-pick">
-          <span>{t(language, "together")}</span>
-          <strong>{match.togetherPick.title}</strong>
+          <span>
+            {t(language, "together")}
+            <small>
+              {language === "tr"
+                ? " Sen izlememissin; aday en az 4 puan vermis. En yuksek puan, sonra en yeni kayit secilir."
+                : " Unseen by you and rated at least 4 by the candidate. Highest rating, then newest entry wins."}
+            </small>
+          </span>
+          <strong>
+            {match.togetherPick.title}
+            {match.togetherPick.rating !== undefined ? ` · ${formatRating(match.togetherPick.rating)}` : ""}
+          </strong>
         </div>
       )}
     </article>
   );
+}
+
+function MatchDetail({
+  language,
+  match,
+  avatarUrl,
+  onClose,
+}: {
+  language: Language;
+  match: MatchResult;
+  avatarUrl?: string;
+  onClose: () => void;
+}) {
+  return (
+    <div className="match-dialog-backdrop" role="presentation" onMouseDown={onClose}>
+      <section
+        className="match-dialog"
+        role="dialog"
+        aria-modal="true"
+        aria-label={`${match.user.displayName} match details`}
+        onMouseDown={(event) => event.stopPropagation()}
+      >
+        <header>
+          <div className="match-person">
+            <Avatar name={match.user.displayName} src={avatarUrl} large />
+            <div>
+              <h2>{match.user.displayName}</h2>
+              <span>@{match.user.handle} · {match.score}/100</span>
+            </div>
+          </div>
+          <div className="dialog-actions">
+            <a
+              href={`https://letterboxd.com/${match.user.handle}/`}
+              target="_blank"
+              rel="noreferrer"
+              title={language === "tr" ? "Letterboxd profilini ac" : "Open Letterboxd profile"}
+            >
+              <ExternalLink size={18} />
+            </a>
+            <button onClick={onClose} title={language === "tr" ? "Kapat" : "Close"}>
+              <X size={20} />
+            </button>
+          </div>
+        </header>
+
+        <p className="coverage-line">
+          {language === "tr"
+            ? `${match.commonCount} ortak film, veri guveni %${match.confidence}. RSS diger kisinin yalnizca son aktivitelerini gosterdigi icin skor bu kanit miktarina gore merkeze yaklastirilir.`
+            : `${match.commonCount} common films, ${match.confidence}% data confidence. RSS only exposes recent activity, so the score is pulled toward neutral when evidence is thin.`}
+        </p>
+
+        <div className="detail-section">
+          <h3>{language === "tr" ? "Ortak filmler ve puanlar" : "Common films and ratings"}</h3>
+          <div className="rating-table">
+            <div className="rating-row rating-head">
+              <span>{language === "tr" ? "Film" : "Film"}</span>
+              <span>{language === "tr" ? "Sen" : "You"}</span>
+              <span>{match.user.displayName}</span>
+              <span>{language === "tr" ? "Fark" : "Gap"}</span>
+            </div>
+            {match.commonFilms.map((item) => (
+              <div className="rating-row" key={item.film.key}>
+                <span>{item.film.title}</span>
+                <strong>{formatRating(item.targetRating)}</strong>
+                <strong>{formatRating(item.candidateRating)}</strong>
+                <span>{ratingGap(item.targetRating, item.candidateRating)}</span>
+              </div>
+            ))}
+          </div>
+        </div>
+
+        <div className="detail-split">
+          <div className="detail-section">
+            <h3>{language === "tr" ? "Ortak sevilenler" : "Shared loves"}</h3>
+            <FilmList films={match.sharedLoves} />
+          </div>
+          <div className="detail-section">
+            <h3>{language === "tr" ? "Ayrismalar" : "Divergences"}</h3>
+            {match.divergences.length ? (
+              <ul className="film-list">
+                {match.divergences.map((item) => (
+                  <li key={item.film.key}>
+                    <span>{item.film.title}</span>
+                    <small>{formatRating(item.targetRating)} / {formatRating(item.candidateRating)}</small>
+                  </li>
+                ))}
+              </ul>
+            ) : (
+              <p className="muted-line">{language === "tr" ? "Guclu bir ayrisma bulunmadi." : "No strong divergence found."}</p>
+            )}
+          </div>
+        </div>
+      </section>
+    </div>
+  );
+}
+
+function Avatar({ name, src, large = false }: { name: string; src?: string; large?: boolean }) {
+  return src ? (
+    <img className={`profile-avatar${large ? " large" : ""}`} src={src} alt="" loading="lazy" />
+  ) : (
+    <span className={`profile-avatar avatar-fallback${large ? " large" : ""}`}>{name.slice(0, 1).toUpperCase()}</span>
+  );
+}
+
+function formatRating(rating?: number) {
+  return rating === undefined ? "—" : `${rating.toFixed(rating % 1 ? 1 : 0)} ★`;
+}
+
+function ratingGap(a?: number, b?: number) {
+  return a === undefined || b === undefined ? "—" : Math.abs(a - b).toFixed(Math.abs(a - b) % 1 ? 1 : 0);
 }
 
 function Metric({ label, value }: { label: string; value: number }) {
