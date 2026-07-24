@@ -22,6 +22,9 @@ const toneWords = [
 ];
 
 export function getStats(user: UserTaste) {
+  const watched = user.films.filter(
+    (film) => film.rating !== undefined || film.watchedDates.length > 0 || (film.liked && !film.watchlist),
+  ).length;
   const rated = user.films.filter((film) => film.rating !== undefined).length;
   const reviews = user.films.filter((film) => film.review).length;
   const rewatches = user.films.reduce((sum, film) => sum + film.rewatches, 0);
@@ -29,7 +32,7 @@ export function getStats(user: UserTaste) {
   const loved = user.films.filter((film) => (film.rating ?? 0) >= 4 || film.liked).slice(0, 6);
   const disliked = user.films.filter((film) => film.rating !== undefined && film.rating <= 2.5).slice(0, 6);
 
-  return { rated, reviews, rewatches, watchlist, loved, disliked };
+  return { watched, rated, reviews, rewatches, watchlist, loved, disliked };
 }
 
 export function topTerms(user: UserTaste, field: "genres" | "directors" | "countries", limit = 6) {
@@ -52,12 +55,11 @@ export function decadeTerms(user: UserTaste, limit = 6) {
 }
 
 export function buildMatches(target: UserTaste, users: UserTaste[]): MatchResult[] {
-  const globalCounts = countFilms(users);
   const targetMap = new Map(target.films.map((film) => [film.key, film]));
 
   return users
     .filter((user) => user.id !== target.id)
-    .map((user) => scoreUser(target, targetMap, user, globalCounts))
+    .map((user) => scoreUser(target, targetMap, user))
     .sort((a, b) => b.score - a.score);
 }
 
@@ -67,14 +69,13 @@ export async function buildMatchesAsync(
   onProgress?: (completed: number, total: number) => void,
 ): Promise<MatchResult[]> {
   const candidates = users.filter((user) => user.id !== target.id);
-  const globalCounts = countFilms(users);
   const targetMap = new Map(target.films.map((film) => [film.key, film]));
   const results: MatchResult[] = [];
   const chunkSize = 24;
 
   for (let offset = 0; offset < candidates.length; offset += chunkSize) {
     const chunk = candidates.slice(offset, offset + chunkSize);
-    for (const candidate of chunk) results.push(scoreUser(target, targetMap, candidate, globalCounts));
+    for (const candidate of chunk) results.push(scoreUser(target, targetMap, candidate));
     onProgress?.(Math.min(offset + chunk.length, candidates.length), candidates.length);
     await yieldToBrowser();
   }
@@ -109,10 +110,8 @@ function scoreUser(
   target: UserTaste,
   targetMap: Map<string, FilmSignal>,
   candidate: UserTaste,
-  globalCounts: Map<string, number>,
 ): MatchResult {
-  let total = 0;
-  let weight = 0;
+  let totalImpact = 0;
   const sharedLoves: FilmSignal[] = [];
   const sharedDislikes: FilmSignal[] = [];
   const divergences: MatchResult["divergences"] = [];
@@ -120,75 +119,82 @@ function scoreUser(
 
   for (const candidateFilm of candidate.films) {
     const targetFilm = targetMap.get(candidateFilm.key);
-    if (!targetFilm) continue;
-    const rarity = 1 / Math.sqrt(globalCounts.get(candidateFilm.key) ?? 1);
+    if (!targetFilm || targetFilm.rating === undefined || candidateFilm.rating === undefined) continue;
     const targetRating = targetFilm.rating;
     const candidateRating = candidateFilm.rating;
-    commonFilms.push({ film: targetFilm, targetRating, candidateRating });
-    const targetLoved = (targetRating ?? 0) >= 4 || targetFilm.liked === true;
-    const candidateLoved = (candidateRating ?? 0) >= 4 || candidateFilm.liked === true;
-    const targetDisliked = targetRating !== undefined && targetRating <= 2.5;
-    const candidateDisliked = candidateRating !== undefined && candidateRating <= 2.5;
-    const signalWeight = 1 + rarity + (targetFilm.review && candidateFilm.review ? 0.45 : 0);
-
-    let contribution = 0.35;
-    if (targetRating !== undefined && candidateRating !== undefined) {
-      const diff = Math.abs(targetRating - candidateRating);
-      contribution = 1 - Math.min(diff / 4.5, 1);
-    }
+    const targetLoved = targetRating >= 4;
+    const candidateLoved = candidateRating >= 4;
+    const targetDisliked = targetRating <= 2.5;
+    const candidateDisliked = candidateRating <= 2.5;
+    const difference = Math.abs(targetRating - candidateRating);
+    const agreement = Math.round(clamp(1 - difference / 4.5, 0, 1) * 100);
+    let impact = Math.round(agreement - 50);
+    let signal: MatchResult["commonFilms"][number]["signal"] = "agreement";
 
     if (targetLoved && candidateLoved) {
-      contribution = Math.max(contribution, 0.95) + 0.28;
+      impact += 10;
+      signal = "shared-love";
       sharedLoves.push(targetFilm);
-    }
-    if (targetDisliked && candidateDisliked) {
-      contribution += 0.32;
+    } else if (targetDisliked && candidateDisliked) {
+      impact += 6;
+      signal = "shared-dislike";
       sharedDislikes.push(targetFilm);
-    }
-    if ((targetLoved && candidateDisliked) || (targetDisliked && candidateLoved)) {
-      contribution -= 0.52;
+    } else if ((targetLoved && candidateDisliked) || (targetDisliked && candidateLoved)) {
+      impact -= 15;
+      signal = "divergence";
       divergences.push({ film: targetFilm, targetRating, candidateRating });
     }
-
-    contribution += reviewToneSimilarity(targetFilm.review, candidateFilm.review) * 0.22;
-    total += clamp(contribution, -0.3, 1.45) * signalWeight;
-    weight += signalWeight;
+    impact = Math.round(clamp(impact, -65, 60));
+    totalImpact += impact;
+    commonFilms.push({ film: targetFilm, targetRating, candidateRating, agreement, impact, signal });
   }
 
-  const overlapScore = Math.min(1, weight / 18);
-  const affinity = weight ? total / weight : 0;
-  const metadata = metadataAffinity(target, candidate);
-  const commonCount = candidate.films.filter((film) => targetMap.has(film.key)).length;
-  const rawScore = clamp((affinity * 0.72 + metadata * 0.2 + overlapScore * 0.08) * 100, 0, 99);
+  const commonCount = commonFilms.length;
+  const rawScore = commonCount ? Math.round(clamp(50 + totalImpact / commonCount, 0, 99)) : 0;
   const confidence = Math.round(clamp(commonCount / 20, 0, 1) * 100);
   const evidenceFactor = confidence / 100;
   const score = commonCount ? Math.round(50 + (rawScore - 50) * evidenceFactor) : 0;
 
-  const togetherPick = candidate.films
-    .filter((film) => !targetMap.has(film.key) && ((film.rating ?? 0) >= 4 || film.liked === true))
-    .sort((a, b) => {
-      const ratingDifference = (b.rating ?? (b.liked ? 4 : 0)) - (a.rating ?? (a.liked ? 4 : 0));
-      if (ratingDifference) return ratingDifference;
-      return (b.watchedDates[0] ?? "").localeCompare(a.watchedDates[0] ?? "");
-    })[0];
+  const togetherPick = pickWatchlistFilm(target, candidate);
 
   return {
     user: candidate,
     score,
+    rawScore,
     confidence,
-    candidateFilmCount: candidate.films.length,
+    candidateFilmCount: candidate.films.filter((film) => film.rating !== undefined).length,
     commonCount,
     commonFilms: commonFilms.sort((a, b) => {
       const aEvidence = Number(a.targetRating !== undefined) + Number(a.candidateRating !== undefined);
       const bEvidence = Number(b.targetRating !== undefined) + Number(b.candidateRating !== undefined);
       return bEvidence - aEvidence || a.film.title.localeCompare(b.film.title);
     }),
-    sharedLoves: uniqueByKey(sharedLoves).slice(0, 5),
-    sharedDislikes: uniqueByKey(sharedDislikes).slice(0, 5),
-    divergences: divergences.slice(0, 4),
+    sharedLoves: uniqueByKey(sharedLoves),
+    sharedDislikes: uniqueByKey(sharedDislikes),
+    divergences,
     reasons: buildReasons(target, candidate, sharedLoves, sharedDislikes, divergences),
     togetherPick,
   };
+}
+
+function pickWatchlistFilm(target: UserTaste, candidate: UserTaste): MatchResult["togetherPick"] {
+  const candidateMap = new Map(candidate.films.map((film) => [film.key, film]));
+  const mutualWatchlist = target.films
+    .filter((film) => film.watchlist && candidateMap.get(film.key)?.watchlist)
+    .sort((a, b) => a.title.localeCompare(b.title))[0];
+  if (mutualWatchlist) return { film: mutualWatchlist, kind: "mutual-watchlist" };
+
+  const yourWatchlistTheyLoved = target.films
+    .filter((film) => {
+      if (!film.watchlist) return false;
+      const candidateFilm = candidateMap.get(film.key);
+      return candidateFilm?.rating !== undefined && candidateFilm.rating >= 4;
+    })
+    .map((film) => ({ film, candidateRating: candidateMap.get(film.key)?.rating }))
+    .sort((a, b) => (b.candidateRating ?? 0) - (a.candidateRating ?? 0) || a.film.title.localeCompare(b.film.title))[0];
+  return yourWatchlistTheyLoved
+    ? { ...yourWatchlistTheyLoved, kind: "your-watchlist-they-loved" }
+    : undefined;
 }
 
 function buildReasons(
@@ -248,14 +254,6 @@ function jaccard(aValues: string[], bValues: string[]) {
   if (!a.size || !b.size) return 0;
   const intersection = [...a].filter((value) => b.has(value)).length;
   return intersection / new Set([...a, ...b]).size;
-}
-
-function countFilms(users: UserTaste[]) {
-  const counts = new Map<string, number>();
-  for (const user of users) {
-    for (const film of user.films) counts.set(film.key, (counts.get(film.key) ?? 0) + 1);
-  }
-  return counts;
 }
 
 function uniqueByKey(films: FilmSignal[]) {

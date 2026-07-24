@@ -220,6 +220,46 @@ button:hover,
   font-weight: 750;
 }
 
+.extension-help > a {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--teal);
+  font-weight: 800;
+  text-decoration: none;
+}
+
+.usage-guide,
+.score-guide {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.76);
+}
+
+.usage-guide {
+  padding: 10px 12px;
+  font-size: 13px;
+}
+
+.usage-guide summary,
+.score-guide summary {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-weight: 850;
+  cursor: pointer;
+}
+
+.usage-guide ol {
+  margin: 10px 0 0;
+  padding-left: 18px;
+  color: var(--muted);
+}
+
+.usage-guide li + li {
+  margin-top: 5px;
+}
+
 .mini-link {
   display: inline-flex;
   align-items: center;
@@ -736,6 +776,19 @@ select {
   font-size: 14px;
 }
 
+.score-guide {
+  padding: 13px 15px;
+  border-left: 3px solid var(--teal);
+}
+
+.score-guide p {
+  margin: 10px 0 0;
+  max-width: 100ch;
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.5;
+}
+
 .match-list {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -821,7 +874,7 @@ select {
 
 .match-metrics {
   display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(105px, 1fr));
   gap: 8px;
 }
 
@@ -985,6 +1038,33 @@ select {
   font-weight: 800;
 }
 
+.positive-impact {
+  color: var(--teal);
+  font-weight: 900;
+}
+
+.negative-impact {
+  color: var(--red);
+  font-weight: 900;
+}
+
+.connection-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.connection-list a {
+  padding: 6px 9px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  color: var(--teal);
+  background: #fbfaf7;
+  font-size: 13px;
+  font-weight: 800;
+  text-decoration: none;
+}
+
 .empty-state {
   margin: 0;
   padding: 18px;
@@ -1047,6 +1127,28 @@ select {
   color: var(--muted);
   font-size: 12px;
   font-weight: 800;
+}
+
+.history-explainer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 18px;
+}
+
+.history-explainer h2 {
+  margin: 0 0 6px;
+  font-size: 18px;
+}
+
+.history-explainer strong {
+  display: block;
+  margin-top: 8px;
+  font-size: 13px;
+}
+
+.history-explainer .browser-scan-button {
+  flex: 0 0 auto;
 }
 
 .social-list {
@@ -1292,7 +1394,8 @@ select {
 
   .top-strip,
   .filter-band,
-  .social-actions {
+  .social-actions,
+  .history-explainer {
     align-items: stretch;
     flex-direction: column;
   }

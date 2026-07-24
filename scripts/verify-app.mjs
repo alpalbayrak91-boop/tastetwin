@@ -47,7 +47,19 @@ await page.evaluate(async () => {
     request.onsuccess = () => resolve(request.result);
     request.onerror = () => reject(request.error);
   });
-  const owner = state.users.find((user) => user.source === "upload");
+  const storedOwner = state.users.find((user) => user.source === "upload");
+  const watchlistFilm = {
+    key: "film-watchlist-only-2024",
+    title: "Watchlist Only",
+    year: 2024,
+    watchlist: true,
+    watchedDates: [],
+    rewatches: 0,
+    genres: [],
+    directors: [],
+    countries: [],
+  };
+  const owner = { ...storedOwner, films: [...storedOwner.films, watchlistFilm] };
   const extras = Array.from({ length: 17 }, (_, index) => ({
     key: `candidate-${index}`,
     title: `Candidate ${index}`,
@@ -64,9 +76,15 @@ await page.evaluate(async () => {
     handle: "candidate",
     displayName: "Candidate",
     avatarUrl: "/brand/tastetwin-icon.png",
+    networkConnections: 3,
+    connectionHandles: ["friendone", "friendtwo", "friendthree"],
     importedAt: new Date().toISOString(),
     source: "rss",
-    films: [...owner.films.slice(0, 3), ...extras],
+    films: [
+      ...owner.films.slice(0, 3).map((film, index) => (index === 2 ? { ...film, rating: 1 } : film)),
+      { ...watchlistFilm, watchlist: false, rating: 4.5 },
+      ...extras,
+    ],
   };
   const following = Array.from({ length: 135 }, (_, index) => ({
     username: `member${String(index).padStart(3, "0")}`,
@@ -110,13 +128,18 @@ await page.locator(".tabs button").nth(1).click();
 await page.locator(".match-card").first().waitFor();
 const coverage = await page.locator(".coverage-line").first().innerText();
 const score = Number(await page.locator(".radial-score strong").first().innerText());
-if (!coverage.includes("20 filmden 3")) throw new Error(`Unexpected coverage text: ${coverage}`);
+if (!coverage.includes("3 filme ikiniz de puan")) throw new Error(`Unexpected coverage text: ${coverage}`);
 if (score > 60) throw new Error(`Low-evidence score is still too high: ${score}`);
 await page.locator(".match-card").first().click();
 await page.locator(".match-dialog").waitFor();
 const commonRows = await page.locator(".match-dialog .rating-row:not(.rating-head)").count();
 if (commonRows !== 3) throw new Error(`Expected 3 rated common-film rows, found ${commonRows}`);
 if ((await page.locator(".match-card .profile-avatar").count()) === 0) throw new Error("Match avatar missing");
+if (!(await page.locator(".together-pick").innerText()).includes("Watchlist Only")) {
+  throw new Error("Watchlist recommendation missing");
+}
+if ((await page.locator(".connection-list a").count()) !== 3) throw new Error("Mutual connection list missing");
+if ((await page.locator(".negative-impact").count()) !== 1) throw new Error("Divergence penalty missing");
 await page.screenshot({ path: screenshotPath.replace(/\.png$/i, "-detail.png") });
 await page.locator(".match-dialog .dialog-actions button").click();
 

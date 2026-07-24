@@ -7,8 +7,10 @@ import {
   FileUp,
   Film,
   Filter,
+  FolderOpen,
   Globe2,
   Heart,
+  Info,
   Languages,
   Link2,
   Loader2,
@@ -36,6 +38,8 @@ type SocialMember = {
   username: string;
   displayName: string;
   avatarUrl?: string;
+  connections?: number;
+  via?: string[];
 };
 
 type SocialData =
@@ -85,6 +89,10 @@ export default function App() {
   const [activeId, setActiveId] = useState(() => localStorage.getItem("tastetwin.active") ?? "");
   const [accountHandle, setAccountHandle] = useState(() => localStorage.getItem("tastetwin.handle") ?? "");
   const [minCommon, setMinCommon] = useState(1);
+  const [minSharedLoves, setMinSharedLoves] = useState(0);
+  const [maxDivergences, setMaxDivergences] = useState(25);
+  const [minConfidence, setMinConfidence] = useState(0);
+  const [minConnections, setMinConnections] = useState(0);
   const [minScore, setMinScore] = useState(0);
   const [matchLimit, setMatchLimit] = useState(50);
   const [networkCandidateLimit, setNetworkCandidateLimit] = useState(250);
@@ -92,12 +100,12 @@ export default function App() {
   const [matches, setMatches] = useState<MatchResult[]>([]);
   const [matchProgress, setMatchProgress] = useState("");
   const [selectedMatch, setSelectedMatch] = useState<MatchResult>();
-  const [requireDislike, setRequireDislike] = useState(false);
   const [status, setStatus] = useState("");
   const [loading, setLoading] = useState(false);
   const [socialLoading, setSocialLoading] = useState(false);
   const [socialByHandle, setSocialByHandle] = useState<Record<string, SocialData>>(loadStoredSocial);
   const [copied, setCopied] = useState(false);
+  const [preparedExtensionPath, setPreparedExtensionPath] = useState("");
   const [storageReady, setStorageReady] = useState(false);
 
   const uploadedUser = users.find((user) => user.source === "upload");
@@ -139,10 +147,13 @@ export default function App() {
           (match) =>
             match.score >= minScore &&
             match.commonCount >= minCommon &&
-            (!requireDislike || match.sharedDislikes.length > 0),
+            match.sharedLoves.length >= minSharedLoves &&
+            match.divergences.length <= maxDivergences &&
+            match.confidence >= minConfidence &&
+            (match.user.networkConnections ?? 0) >= minConnections,
         )
         .slice(0, matchLimit),
-    [matchLimit, matches, minCommon, minScore, requireDislike],
+    [matchLimit, matches, maxDivergences, minCommon, minConfidence, minConnections, minScore, minSharedLoves],
   );
   const recommendations = useMemo(() => (activeUser ? buildRecommendations(activeUser, matches) : []), [activeUser, matches]);
   const genreTerms = useMemo(() => (activeUser ? topTerms(activeUser, "genres") : []), [activeUser]);
@@ -256,8 +267,8 @@ export default function App() {
       setTab("overview");
       setStatus(
         language === "tr"
-          ? `${t(language, "uploadOk")}: ${imported.films.length} film. Hesabini baglayinca takip ettiklerin otomatik eslesir.`
-          : `${t(language, "uploadOk")}: ${imported.films.length} films. Connect your handle to match your following automatically.`,
+          ? `${t(language, "uploadOk")}: ${getStats(imported).watched} izlenen, ${getStats(imported).watchlist} watchlist. Hesabini baglayinca sosyal veriyi eslestirebilirsin.`
+          : `${t(language, "uploadOk")}: ${getStats(imported).watched} watched, ${getStats(imported).watchlist} watchlist. Connect your handle to match social data.`,
       );
     } catch (error) {
       console.error(error);
@@ -413,6 +424,8 @@ export default function App() {
               ...user,
               displayName: member?.displayName || user.displayName,
               avatarUrl: member?.avatarUrl || user.avatarUrl,
+              networkConnections: member?.connections,
+              connectionHandles: member?.via,
             };
           }),
         );
@@ -439,13 +452,71 @@ export default function App() {
     }
   }
 
+  async function prepareExtensionFolder() {
+    setStatus("");
+    try {
+      const response = await fetch("/api/system/prepare-extension", {
+        method: "POST",
+        headers: { "X-TasteTwin-Request": "app" },
+      });
+      const payload = await response.json();
+      if (!response.ok || typeof payload.path !== "string") {
+        throw new Error(payload.error ?? "extension_prepare_failed");
+      }
+      setPreparedExtensionPath(payload.path);
+      await navigator.clipboard.writeText(payload.path).catch(() => undefined);
+      setStatus(
+        language === "tr"
+          ? "Eklenti klasoru hazirlandi, Windows Gezgini acildi ve klasor yolu kopyalandi."
+          : "Extension folder prepared, opened in Explorer, and its path copied.",
+      );
+    } catch (error) {
+      console.error(error);
+      setStatus(
+        language === "tr"
+          ? "Eklenti klasoru hazirlanamadi. Uygulamanin masaustu surumunu acip tekrar dene."
+          : "Could not prepare the extension folder. Open the desktop app and retry.",
+      );
+    }
+  }
+
+  function resetFollowerHistory() {
+    const handle = (accountHandle || activeUser?.handle || "").toLowerCase();
+    if (!handle) return;
+    localStorage.removeItem(`tastetwin.followers.${handle}`);
+    setSocialByHandle((current) => {
+      const social = current[handle];
+      if (!social?.available) return current;
+      return {
+        ...current,
+        [handle]: {
+          ...social,
+          previousCheckedAt: undefined,
+          lostFollowers: [],
+          newFollowers: [],
+        },
+      };
+    });
+    setStatus(
+      language === "tr"
+        ? "Takipci karsilastirma gecmisi sifirlandi. Sonraki tam tarama yeni baslangic olacak."
+        : "Follower comparison history reset. The next complete scan becomes the new baseline.",
+    );
+  }
+
   function clearProfiles() {
+    const handle = (accountHandle || activeUser?.handle || "").toLowerCase();
     setUsers([]);
     setActiveId("");
+    setAccountHandle("");
+    setSocialByHandle({});
+    setMatches([]);
     setStatus("");
     setTab("overview");
     localStorage.removeItem("tastetwin.users");
     localStorage.removeItem("tastetwin.active");
+    localStorage.removeItem("tastetwin.handle");
+    if (handle) localStorage.removeItem(`tastetwin.followers.${handle}`);
     void clearPersistentState(PERSISTENT_STATE_KEY);
   }
 
@@ -516,20 +587,37 @@ export default function App() {
             <Globe2 size={17} />
             <span>{language === "tr" ? "Hizli acik kontrol (eksik olabilir)" : "Quick public check (may be partial)"}</span>
           </button>
-          <a className="browser-scan-button" href="/tastetwin-extension.zip" download="tastetwin-extension.zip">
-            <Download size={17} />
-            <span>{language === "tr" ? "1. Eklenti ZIP'ini indir" : "1. Download extension ZIP"}</span>
-          </a>
+          <button className="browser-scan-button" onClick={prepareExtensionFolder}>
+            <FolderOpen size={17} />
+            <span>{language === "tr" ? "Eklenti klasorunu hazirla" : "Prepare extension folder"}</span>
+          </button>
           <div className="extension-help">
             <strong>{language === "tr" ? "Eklenti kurulumu" : "Extension setup"}</strong>
             <ol>
-              <li>{language === "tr" ? "Indirdigin ZIP'e sag tikla, Tumunu ayikla de." : "Right-click the downloaded ZIP and extract all files."}</li>
-              <li>{language === "tr" ? "Chrome adres cubuguna chrome://extensions yaz; Gelistirici modu'nu ac." : "Open chrome://extensions and enable Developer mode."}</li>
-              <li>{language === "tr" ? "Paketlenmemis oge yukle / Load unpacked ile ayiklanan klasoru sec." : "Choose Load unpacked and select the extracted folder."}</li>
+              <li>{language === "tr" ? "Yukaridaki dugme klasoru hazirlar ve acilir." : "The button above prepares and opens the folder."}</li>
+              <li>{language === "tr" ? "Chrome'da chrome://extensions ac; Gelistirici modu'nu ac." : "Open chrome://extensions and enable Developer mode."}</li>
+              <li>{language === "tr" ? "Load unpacked ile ZIP'i degil, acilan chrome-extension klasorunu sec." : "Choose Load unpacked and select the opened chrome-extension folder, not the ZIP."}</li>
             </ol>
+            {preparedExtensionPath && <code>{preparedExtensionPath}</code>}
             <code>chrome://extensions</code>
+            <a href="/tastetwin-extension.zip" download="tastetwin-extension.zip">
+              <Download size={14} />
+              {language === "tr" ? "ZIP'i ayrica indir" : "Download ZIP separately"}
+            </a>
           </div>
         </div>
+
+        <details className="usage-guide">
+          <summary>
+            <Info size={16} />
+            {language === "tr" ? "Nasil kullanilir?" : "How to use"}
+          </summary>
+          <ol>
+            <li>{language === "tr" ? "Letterboxd export ZIP'ini Tam film arsivi ile yukle." : "Load your Letterboxd export ZIP as the full archive."}</li>
+            <li>{language === "tr" ? "Eklentiyi kendi profilinde calistir; sonra Eklenti taramasini al." : "Run the extension on your profile, then load its scan."}</li>
+            <li>{language === "tr" ? "Sosyal agdan takip durumunu, Zevk eslesmelerinden puanli karsilastirmayi ac." : "Use Social graph for follow status and Taste matches for rated comparisons."}</li>
+          </ol>
+        </details>
 
         <label className="upload-button" title={t(language, "import")}>
           <FileUp size={18} />
@@ -538,8 +626,8 @@ export default function App() {
         </label>
 
         <div className="source-summary">
-          <span>{language === "tr" ? "Benim arsiv" : "My archive"}</span>
-          <strong>{uploadedUser ? uploadedUser.films.length : 0}</strong>
+          <span>{language === "tr" ? "Izlenen film" : "Watched films"}</span>
+          <strong>{uploadedUser ? getStats(uploadedUser).watched : 0}</strong>
           <span>{language === "tr" ? "Film verisi alinan aday" : "Candidates with film data"}</span>
           <strong>{rssUsers.length}</strong>
           {currentSocial?.available && (
@@ -614,7 +702,7 @@ export default function App() {
 
             {tab === "overview" && (
               <section className="view-grid overview-grid">
-                <StatsPanel language={language} stats={stats} filmCount={activeUser.films.length} />
+                <StatsPanel language={language} stats={stats} />
                 <PosterPanel language={language} films={activeUser.films} />
                 <BarsPanel title={t(language, "favoriteZones")} icon={<Film size={18} />} data={decadeData} />
                 <BarsPanel title={t(language, "tasteDna")} icon={<Heart size={18} />} data={genreTerms} />
@@ -639,7 +727,7 @@ export default function App() {
                     </button>
                   </div>
                   <label>
-                    {t(language, "minCommon")}
+                    {language === "tr" ? "Min ortak puanli" : "Min co-rated"}
                     <input
                       type="range"
                       min="0"
@@ -648,6 +736,51 @@ export default function App() {
                       onChange={(event) => setMinCommon(Number(event.target.value))}
                     />
                     <strong>{minCommon}</strong>
+                  </label>
+                  <label>
+                    {language === "tr" ? "Min ortak sevilen" : "Min shared loves"}
+                    <input
+                      type="range"
+                      min="0"
+                      max="10"
+                      value={minSharedLoves}
+                      onChange={(event) => setMinSharedLoves(Number(event.target.value))}
+                    />
+                    <strong>{minSharedLoves}</strong>
+                  </label>
+                  <label>
+                    {language === "tr" ? "Maks ayrisma" : "Max splits"}
+                    <input
+                      type="range"
+                      min="0"
+                      max="25"
+                      value={maxDivergences}
+                      onChange={(event) => setMaxDivergences(Number(event.target.value))}
+                    />
+                    <strong>{maxDivergences}</strong>
+                  </label>
+                  <label>
+                    {language === "tr" ? "Min gecerlilik" : "Min validity"}
+                    <input
+                      type="range"
+                      min="0"
+                      max="100"
+                      step="5"
+                      value={minConfidence}
+                      onChange={(event) => setMinConfidence(Number(event.target.value))}
+                    />
+                    <strong>%{minConfidence}</strong>
+                  </label>
+                  <label>
+                    {language === "tr" ? "Min ortak baglanti" : "Min mutual links"}
+                    <input
+                      type="range"
+                      min="0"
+                      max="10"
+                      value={minConnections}
+                      onChange={(event) => setMinConnections(Number(event.target.value))}
+                    />
+                    <strong>{minConnections}</strong>
                   </label>
                   <label>
                     {language === "tr" ? "En az skor" : "Minimum score"}
@@ -671,15 +804,24 @@ export default function App() {
                       ))}
                     </select>
                   </label>
-                  <label className="check-label">
-                    <input
-                      type="checkbox"
-                      checked={requireDislike}
-                      onChange={(event) => setRequireDislike(event.target.checked)}
-                    />
-                    {t(language, "withDislikes")}
-                  </label>
                 </div>
+
+                <details className="score-guide">
+                  <summary>
+                    <Info size={16} />
+                    {language === "tr" ? "Puan nasil hesaplaniyor?" : "How is the score calculated?"}
+                  </summary>
+                  <p>
+                    {language === "tr"
+                      ? "Yalnizca iki kisinin de 0.5-5 arasinda puan verdigi filmler kullanilir. Watchlist ve puansiz izlemeler ortak sayilmaz. Benzer puan arti; ikinizin de 4+ vermesi ek arti; ikinizin de 2.5 ve alti vermesi kucuk arti; biri 4+ digeri 2.5 ve altiysa eksi yazar."
+                      : "Only films rated by both people are used. Watchlist and unrated watches do not count. Similar ratings add points, shared 4+ ratings add a bonus, shared 2.5-or-lower ratings add a smaller bonus, and love-versus-dislike splits subtract points."}
+                  </p>
+                  <p>
+                    {language === "tr"
+                      ? "Gecerlilik, ortak puanli film sayisidir: 20 ortak puanli film %100 kanit sayilir. Az veri varsa ham zevk puani 50'ye yaklastirilir."
+                      : "Validity comes from co-rated film count: 20 co-rated films is treated as 100% evidence. With sparse evidence, the raw taste score is pulled toward 50."}
+                  </p>
+                </details>
 
                 <p className="match-summary">
                   {matchProgress ||
@@ -712,6 +854,7 @@ export default function App() {
                 onUseNetwork={useNetworkAsMatchCandidates}
                 networkCandidateLimit={networkCandidateLimit}
                 onNetworkCandidateLimitChange={setNetworkCandidateLimit}
+                onResetHistory={resetFollowerHistory}
               />
             )}
 
@@ -764,14 +907,12 @@ export default function App() {
 function StatsPanel({
   language,
   stats,
-  filmCount,
 }: {
   language: Language;
   stats: ReturnType<typeof getStats>;
-  filmCount: number;
 }) {
   const items = [
-    [t(language, "films"), filmCount, Film],
+    [t(language, "films"), stats.watched, Film],
     [t(language, "rated"), stats.rated, Star],
     [t(language, "reviews"), stats.reviews, Clapperboard],
     [t(language, "rewatches"), stats.rewatches, RefreshCcw],
@@ -800,6 +941,7 @@ function SocialPanel({
   onUseNetwork,
   networkCandidateLimit,
   onNetworkCandidateLimitChange,
+  onResetHistory,
 }: {
   language: Language;
   data?: SocialData;
@@ -809,6 +951,7 @@ function SocialPanel({
   onUseNetwork: () => void;
   networkCandidateLimit: number;
   onNetworkCandidateLimitChange: (value: number) => void;
+  onResetHistory: () => void;
 }) {
   if (!data) {
     return (
@@ -912,6 +1055,27 @@ function SocialPanel({
             <span>{label}</span>
           </div>
         ))}
+      </div>
+      <div className="panel history-explainer">
+        <div>
+          <h2>{language === "tr" ? "Takip degisiklikleri nasil bulunuyor?" : "How follow changes are detected"}</h2>
+          <p className="muted-line">
+            {language === "tr"
+              ? "Tam eklenti taramasindaki takipci listesi bu bilgisayarda TasteTwin uygulama verisine kaydedilir. Sonraki tam tarama onceki listeyle karsilastirilir; eksilenler Takipten cikanlar, eklenenler Yeni takipciler olur. Uygulama verisini silersen veya bilgisayar degistirirsen bu gecmis de silinir."
+              : "The follower list from a complete extension scan is stored in TasteTwin's local app data on this computer. The next complete scan is compared with it to find lost and new followers. Clearing app data or changing computers removes this history."}
+          </p>
+          <strong>
+            {data.previousCheckedAt
+              ? `${language === "tr" ? "Karsilastirilan onceki tarama" : "Previous scan compared"}: ${new Date(data.previousCheckedAt).toLocaleString(language === "tr" ? "tr-TR" : "en-US")}`
+              : language === "tr"
+                ? "Bu tarama baslangic noktasi olarak kaydedildi."
+                : "This scan is saved as the baseline."}
+          </strong>
+        </div>
+        <button className="browser-scan-button" onClick={onResetHistory}>
+          <RefreshCcw size={17} />
+          <span>{language === "tr" ? "Takip gecmisini sifirla" : "Reset follow history"}</span>
+        </button>
       </div>
       {data.warning && (
         <p className="social-note">
@@ -1168,16 +1332,20 @@ function MatchCard({
       </div>
 
       <div className="match-metrics">
-        <Metric label={language === "tr" ? "ortak film kaydi" : "shared film records"} value={match.commonCount} />
+        <Metric label={language === "tr" ? "ortak puanli film" : "co-rated films"} value={match.commonCount} />
         <Metric label={t(language, "sharedLoves")} value={match.sharedLoves.length} />
         <Metric label={t(language, "sharedDislikes")} value={match.sharedDislikes.length} />
         <Metric label={t(language, "divergences")} value={match.divergences.length} />
+        <Metric
+          label={language === "tr" ? "ortak baglanti" : "mutual links"}
+          value={match.user.networkConnections ?? 0}
+        />
       </div>
 
       <p className="coverage-line">
         {language === "tr"
-          ? `Adayin RSS akisinda gorulebilen ${match.candidateFilmCount} filmden ${match.commonCount} tanesi arsivinla eslesti. ${confidenceLabel} (${match.confidence}%).`
-          : `${match.commonCount} of ${match.candidateFilmCount} films visible in this candidate's RSS activity matched your archive. ${confidenceLabel} (${match.confidence}%).`}
+          ? `Adayin RSS akisinda ${match.candidateFilmCount} puanli film var; ${match.commonCount} filme ikiniz de puan vermissiniz. Skor ${match.score}, ham uyum ${match.rawScore}; ${confidenceLabel} (%${match.confidence}).`
+          : `The candidate has ${match.candidateFilmCount} rated RSS films; you both rated ${match.commonCount}. Score ${match.score}, raw affinity ${match.rawScore}; ${confidenceLabel} (${match.confidence}%).`}
       </p>
 
       <div className="reason-list">
@@ -1193,13 +1361,17 @@ function MatchCard({
             {t(language, "together")}
             <small>
               {language === "tr"
-                ? " Sen izlememissin; aday en az 4 puan vermis. En yuksek puan, sonra en yeni kayit secilir."
-                : " Unseen by you and rated at least 4 by the candidate. Highest rating, then newest entry wins."}
+                ? match.togetherPick.kind === "mutual-watchlist"
+                  ? " Film ikinizin de watchlistinde. Bu bilgi ancak iki tarafta da watchlist verisi varsa bulunabilir."
+                  : ` Film senin watchlistinde; ${match.user.displayName} filme en az 4 vermis.`
+                : match.togetherPick.kind === "mutual-watchlist"
+                  ? " The film is on both watchlists. This requires watchlist data from both people."
+                  : ` The film is on your watchlist and ${match.user.displayName} rated it at least 4.`}
             </small>
           </span>
           <strong>
-            {match.togetherPick.title}
-            {match.togetherPick.rating !== undefined ? ` · ${formatRating(match.togetherPick.rating)}` : ""}
+            {match.togetherPick.film.title}
+            {match.togetherPick.candidateRating !== undefined ? ` · ${formatRating(match.togetherPick.candidateRating)}` : ""}
           </strong>
         </div>
       )}
@@ -1252,8 +1424,8 @@ function MatchDetail({
 
         <p className="coverage-line">
           {language === "tr"
-            ? `${match.commonCount} ortak film, veri guveni %${match.confidence}. RSS diger kisinin yalnizca son aktivitelerini gosterdigi icin skor bu kanit miktarina gore merkeze yaklastirilir.`
-            : `${match.commonCount} common films, ${match.confidence}% data confidence. RSS only exposes recent activity, so the score is pulled toward neutral when evidence is thin.`}
+            ? `${match.commonCount} ortak puanli film, gecerlilik %${match.confidence}. Ham uyum ${match.rawScore}; kanit azsa gosterilen skor ${match.score} olarak 50'ye yaklastirilir. Watchlist ve puansiz filmler hesaba katilmaz.`
+            : `${match.commonCount} co-rated films, ${match.confidence}% validity. Raw affinity is ${match.rawScore}; sparse evidence pulls the displayed score to ${match.score}. Watchlist and unrated films are excluded.`}
         </p>
 
         <div className="detail-section">
@@ -1263,14 +1435,16 @@ function MatchDetail({
               <span>{language === "tr" ? "Film" : "Film"}</span>
               <span>{language === "tr" ? "Sen" : "You"}</span>
               <span>{match.user.displayName}</span>
-              <span>{language === "tr" ? "Fark" : "Gap"}</span>
+              <span>{language === "tr" ? "Etki" : "Impact"}</span>
             </div>
             {match.commonFilms.map((item) => (
               <div className="rating-row" key={item.film.key}>
                 <span>{item.film.title}</span>
                 <strong>{formatRating(item.targetRating)}</strong>
                 <strong>{formatRating(item.candidateRating)}</strong>
-                <span>{ratingGap(item.targetRating, item.candidateRating)}</span>
+                <span className={item.impact >= 0 ? "positive-impact" : "negative-impact"}>
+                  {item.impact >= 0 ? "+" : ""}{item.impact}
+                </span>
               </div>
             ))}
           </div>
@@ -1297,6 +1471,28 @@ function MatchDetail({
             )}
           </div>
         </div>
+
+        {(match.user.connectionHandles?.length ?? 0) > 0 && (
+          <div className="detail-section">
+            <h3>
+              {language === "tr"
+                ? `Seni bu adaya baglayan ${match.user.connectionHandles?.length} kisi`
+                : `${match.user.connectionHandles?.length} people connecting you to this candidate`}
+            </h3>
+            <p className="muted-line">
+              {language === "tr"
+                ? "Bunlar senin takip ettigin ve bu adayi da takip eden hesaplardir."
+                : "These are accounts you follow that also follow this candidate."}
+            </p>
+            <div className="connection-list">
+              {match.user.connectionHandles?.map((handle) => (
+                <a href={`https://letterboxd.com/${handle}/`} target="_blank" rel="noreferrer" key={handle}>
+                  @{handle}
+                </a>
+              ))}
+            </div>
+          </div>
+        )}
       </section>
     </div>
   );
@@ -1312,10 +1508,6 @@ function Avatar({ name, src, large = false }: { name: string; src?: string; larg
 
 function formatRating(rating?: number) {
   return rating === undefined ? "—" : `${rating.toFixed(rating % 1 ? 1 : 0)} ★`;
-}
-
-function ratingGap(a?: number, b?: number) {
-  return a === undefined || b === undefined ? "—" : Math.abs(a - b).toFixed(Math.abs(a - b) % 1 ? 1 : 0);
 }
 
 function Metric({ label, value }: { label: string; value: number }) {
@@ -1382,8 +1574,12 @@ function reasonLines(match: MatchResult, language: Language) {
   if (match.togetherPick) {
     lines.push(
       tr
-        ? `${match.user.displayName} tarafindan yuksek puanlanmis yeni aday: ${match.togetherPick.title}.`
-        : `${match.user.displayName} rated this unseen candidate highly: ${match.togetherPick.title}.`,
+        ? match.togetherPick.kind === "mutual-watchlist"
+          ? `Ikimizin da watchlistinde: ${match.togetherPick.film.title}.`
+          : `Senin watchlistinde, ${match.user.displayName} tarafindan yuksek puanlanmis: ${match.togetherPick.film.title}.`
+        : match.togetherPick.kind === "mutual-watchlist"
+          ? `On both watchlists: ${match.togetherPick.film.title}.`
+          : `On your watchlist and highly rated by ${match.user.displayName}: ${match.togetherPick.film.title}.`,
     );
   }
   return lines.length ? lines : match.reasons;

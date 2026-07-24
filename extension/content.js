@@ -67,6 +67,7 @@ async function scanTwoHopNetwork(owner, directFollowing) {
       candidates.set(next.username, {
         ...next,
         connections: (current?.connections ?? 0) + 1,
+        via: [...new Set([...(current?.via ?? []), member.username])],
         avatarUrl: current?.avatarUrl || next.avatarUrl,
         displayName: current?.displayName || next.displayName,
       });

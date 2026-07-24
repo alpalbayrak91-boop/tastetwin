@@ -7,6 +7,7 @@ import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { XMLParser } from "fast-xml-parser";
 import { load } from "cheerio";
+import JSZip from "jszip";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const distDir = process.env.TASTETWIN_DIST_DIR
@@ -16,6 +17,7 @@ const dataDir = process.env.TASTETWIN_DATA_DIR
   ? path.resolve(process.env.TASTETWIN_DATA_DIR)
   : path.join(__dirname, "data");
 const bridgeCacheFile = path.join(dataDir, "bridge-cache.json");
+const preparedExtensionDir = path.join(dataDir, "chrome-extension");
 const port = Number(process.env.PORT ?? 5173);
 const parser = new XMLParser({
   ignoreAttributes: false,
@@ -34,6 +36,33 @@ await restoreBridgeCache();
 createServer(async (req, res) => {
   try {
     const url = new URL(req.url ?? "/", `http://${req.headers.host ?? "127.0.0.1"}`);
+
+    if (url.pathname === "/api/system/prepare-extension" && req.method === "POST") {
+      if (req.headers["x-tastetwin-request"] !== "app") {
+        sendJson(res, 403, { error: "app_request_required" });
+        return;
+      }
+      const zip = await JSZip.loadAsync(await readFile(path.join(distDir, "tastetwin-extension.zip")));
+      await mkdir(preparedExtensionDir, { recursive: true });
+      for (const entry of Object.values(zip.files)) {
+        if (entry.dir) continue;
+        const relativePath = entry.name.replace(/\\/g, "/");
+        if (!relativePath || relativePath.startsWith("/") || relativePath.split("/").includes("..")) {
+          throw new Error("Invalid extension ZIP path");
+        }
+        const destination = path.resolve(preparedExtensionDir, relativePath);
+        if (!destination.startsWith(`${path.resolve(preparedExtensionDir)}${path.sep}`)) {
+          throw new Error("Invalid extension destination");
+        }
+        await mkdir(path.dirname(destination), { recursive: true });
+        await writeFile(destination, await entry.async("nodebuffer"));
+      }
+      if (process.platform === "win32" && process.env.TASTETWIN_NO_OPEN !== "1") {
+        execFile("explorer.exe", [preparedExtensionDir], () => undefined);
+      }
+      sendJson(res, 200, { ok: true, path: preparedExtensionDir });
+      return;
+    }
 
     if (url.pathname === "/api/letterboxd/rss") {
       const startedAt = Date.now();
@@ -264,13 +293,17 @@ function socialFromExtension(payload) {
         network.candidates.map((candidate) => [String(candidate?.username ?? "").toLowerCase(), candidate]),
       );
       social.networkCandidates = normalizeBridgeMembers(network.candidates)
-        .map((member) => ({
-          ...member,
-          connections: Math.max(
-            1,
-            Math.min(10000, Number.parseInt(rawByHandle.get(member.username)?.connections, 10) || 1),
-          ),
-        }))
+        .map((member) => {
+          const raw = rawByHandle.get(member.username);
+          const via = Array.isArray(raw?.via)
+            ? [...new Set(raw.via.map((value) => String(value).toLowerCase()).filter((value) => /^[a-z0-9_-]{2,32}$/.test(value)))].slice(0, 1000)
+            : [];
+          return {
+            ...member,
+            connections: Math.max(1, Math.min(10000, Number.parseInt(raw?.connections, 10) || via.length || 1)),
+            via,
+          };
+        })
         .sort((a, b) => b.connections - a.connections || a.username.localeCompare(b.username));
       social.networkHandles = social.networkCandidates.map((member) => member.username);
     }

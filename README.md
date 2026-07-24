@@ -10,6 +10,8 @@ TasteTwin is a local-first Letterboxd social graph and movie taste matching app.
 - Compares the imported archive with recent public RSS activity from other members.
 - Defaults matching to people outside your current following list.
 - Opens each match into a rated common-film and divergence breakdown.
+- Excludes watchlist and unrated entries from co-rated match evidence.
+- Uses a separate validity percentage based on the number of co-rated films.
 - Keeps imported and scanned data on the user's computer.
 
 ## Install on Windows
@@ -28,6 +30,8 @@ TasteTwin is a local-first Letterboxd social graph and movie taste matching app.
 4. Run the optional two-hop network scan to discover candidates outside your following list. Choose how many ranked candidates should have their RSS activity checked.
 
 Network candidates are ranked by how often they appear across the following lists that were scanned. RSS matching is processed in small batches and the result count is user-controlled, so the interface remains usable during large calculations.
+
+The displayed taste score uses only films rated by both people. Similar ratings add evidence, shared high and low ratings add bonuses, and love-versus-dislike splits subtract points. Sparse comparisons are pulled toward a neutral score of 50 and shown with a separate validity percentage.
 
 Windows may show an unknown publisher warning until the installer is code-signed.
 
