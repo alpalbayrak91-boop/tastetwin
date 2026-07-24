@@ -40,6 +40,7 @@ import {
   buildSocialDirectory,
   filterAndSortSocialDirectory,
   paginateSocialDirectory,
+  type SocialDirectoryFilters,
   type SocialDirectoryEntry,
   type SocialDirectorySort,
   type SocialMemberRecord,
@@ -63,9 +64,19 @@ type SocialData =
       handle: string;
       checkedAt: string;
       source: "official-api" | "public-pages" | "browser-session" | "browser-extension";
+      scanStage?: "social-complete" | "network-complete";
       complete?: boolean;
       warning?: string;
       previousCheckedAt?: string;
+      history?: Array<{
+        checkedAt: string;
+        following: number;
+        followers: number;
+        mutuals: number;
+        newFollowers: number;
+        lostFollowers: number;
+        networkCandidates?: number;
+      }>;
       counts: {
         following: number;
         followers: number;
@@ -101,6 +112,22 @@ type PersistentAppState = {
 
 const PERSISTENT_STATE_KEY = "app";
 
+type TmdbRunState = {
+  phase: "idle" | "validating" | "enriching" | "done" | "error";
+  message: string;
+  processed: number;
+  total: number;
+  enriched: number;
+  lastRun?: string;
+};
+
+type ActivityScanProgress = {
+  processed: number;
+  total: number;
+  loaded: number;
+  failed: number;
+};
+
 export default function App() {
   const [language, setLanguage] = useState<Language>("tr");
   const [tab, setTab] = useState<Tab>("overview");
@@ -135,6 +162,20 @@ export default function App() {
   const [preparedExtensionPath, setPreparedExtensionPath] = useState("");
   const [tmdbToken, setTmdbToken] = useState(() => localStorage.getItem("tastetwin.tmdbToken") ?? "");
   const [tmdbLoading, setTmdbLoading] = useState(false);
+  const [tmdbRun, setTmdbRun] = useState<TmdbRunState>(() => {
+    try {
+      return JSON.parse(localStorage.getItem("tastetwin.tmdbRun") ?? "null") ?? {
+        phase: "idle",
+        message: "TMDB tokeni henuz dogrulanmadi.",
+        processed: 0,
+        total: 0,
+        enriched: 0,
+      };
+    } catch {
+      return { phase: "idle", message: "TMDB tokeni henuz dogrulanmadi.", processed: 0, total: 0, enriched: 0 };
+    }
+  });
+  const [activityScanProgress, setActivityScanProgress] = useState<ActivityScanProgress>();
   const [storageReady, setStorageReady] = useState(false);
 
   const uploadedUser = users.find((user) => user.source === "upload");
@@ -177,9 +218,9 @@ export default function App() {
             newFollowers: currentSocial.newFollowers,
             lostFollowers: currentSocial.lostFollowers,
             networkCandidates: currentSocial.networkCandidates,
-          }, users).length
+          }, users, matches).length
         : 0,
-    [currentSocial, users],
+    [currentSocial, matches, users],
   );
   const matchCandidates = useMemo(
     () => (activeUser ? users.filter((user) => user.id !== activeUser.id) : []),
@@ -450,6 +491,70 @@ export default function App() {
     }
   }
 
+  async function openLetterboxdAndScan() {
+    const handle = (accountHandle || activeUser?.handle || "").trim().replace(/^@/, "").toLowerCase();
+    if (!/^[a-z0-9_-]{2,32}$/.test(handle)) {
+      setStatus(language === "tr" ? "Once Letterboxd kullanici adini yaz." : "Enter your Letterboxd handle first.");
+      return;
+    }
+    setAccountHandle(handle);
+    setStatus(language === "tr" ? "Chrome aciliyor; eklenti otomatik taramayi baslatacak." : "Opening Chrome; the extension will start automatically.");
+    try {
+      const response = await fetch("/api/extension/request-scan", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "X-TasteTwin-Request": "app" },
+        body: JSON.stringify({ handle }),
+      });
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(payload.error ?? "scan_request_failed");
+      window.open(`https://letterboxd.com/${encodeURIComponent(handle)}/`, "_blank", "noopener,noreferrer");
+      void waitForRequestedScan(handle, payload.requestedAt);
+    } catch (error) {
+      console.error(error);
+      setStatus(language === "tr" ? "Otomatik tarama emri verilemedi." : "Could not request automatic scanning.");
+    }
+  }
+
+  async function waitForRequestedScan(handle: string, requestedAt: string) {
+    const deadline = Date.now() + 15 * 60 * 1000;
+    let socialReceived = false;
+    while (Date.now() < deadline) {
+      await new Promise((resolve) => window.setTimeout(resolve, 3500));
+      try {
+        const response = await fetch(`/api/letterboxd/social?handle=${encodeURIComponent(handle)}&source=extension`);
+        if (!response.ok) continue;
+        const payload = (await response.json()) as SocialData;
+        if (!payload.available || Date.parse(payload.checkedAt) < Date.parse(requestedAt)) continue;
+        const enriched = addFollowerChanges(handle, payload);
+        setSocialByHandle((current) => ({ ...current, [handle]: enriched }));
+        setTab("social");
+        if (!socialReceived) {
+          socialReceived = true;
+          setStatus(
+            language === "tr"
+              ? `Sosyal listeler geldi: ${enriched.counts.following} takip, ${enriched.counts.followers} takipci. Ag taramasi suruyor.`
+              : `Social lists received: ${enriched.counts.following} following, ${enriched.counts.followers} followers. Network scan continues.`,
+          );
+        }
+        if (enriched.network?.completedAt && Date.parse(enriched.network.completedAt) >= Date.parse(requestedAt)) {
+          setStatus(
+            language === "tr"
+              ? `Tarama tamamlandi: ${enriched.counts.following} takip, ${enriched.counts.followers} takipci, ${enriched.network.candidateCount ?? 0} ag adayi.`
+              : `Scan complete: ${enriched.counts.following} following, ${enriched.counts.followers} followers, ${enriched.network.candidateCount ?? 0} network candidates.`,
+          );
+          return;
+        }
+      } catch {
+        // The extension may still be scanning.
+      }
+    }
+    setStatus(
+      language === "tr"
+        ? "Sosyal tarama bekleme suresi doldu. Chrome eklentisindeki son durumu kontrol et."
+        : "Timed out waiting for the scan. Check the extension status in Chrome.",
+    );
+  }
+
   async function useFollowingAsMatchCandidates() {
     const handle = accountHandle || activeUser?.handle || "";
     const social = socialByHandle[handle];
@@ -506,7 +611,7 @@ export default function App() {
   async function fetchProfilesForHandles(
     cleanHandles: string[],
     members: SocialMember[] = [],
-    targetTab: Tab = "matches",
+    targetTab: Tab = "social",
   ) {
     setLoading(true);
     setStatus("");
@@ -517,6 +622,7 @@ export default function App() {
       const fetched: UserTaste[] = [];
       let failed = 0;
       const batchSize = 60;
+      setActivityScanProgress({ processed: 0, total: handles.length, loaded: 0, failed: 0 });
       for (let offset = 0; offset < handles.length; offset += batchSize) {
         const batch = handles.slice(offset, offset + batchSize);
         setStatus(
@@ -527,8 +633,7 @@ export default function App() {
         const response = await fetch(`/api/letterboxd/rss?handles=${encodeURIComponent(batch.join(","))}`);
         const payload = await response.json();
         if (!response.ok) throw new Error(payload.error ?? "fetch_failed");
-        fetched.push(
-          ...((payload.users ?? []) as UserTaste[]).map((user) => {
+        const enrichedBatch = ((payload.users ?? []) as UserTaste[]).map((user) => {
             const member = memberByHandle.get(user.handle.toLowerCase());
             return {
               ...user,
@@ -539,21 +644,19 @@ export default function App() {
               connectionHandles: member?.via,
               connectionDetails: member?.viaDetails,
             };
-          }),
-        );
+          });
+        fetched.push(...enrichedBatch);
         failed += payload.errors?.length ?? 0;
+        setUsers((current) => mergeRssUsers(current, enrichedBatch));
+        setActivityScanProgress({
+          processed: Math.min(offset + batch.length, handles.length),
+          total: handles.length,
+          loaded: fetched.length,
+          failed,
+        });
+        await new Promise((resolve) => window.setTimeout(resolve, 0));
       }
       const currentUpload = users.find((user) => user.source === "upload");
-      const rssByHandle = new Map(
-        users
-          .filter((user) => user.source === "rss")
-          .map((user) => [user.handle.toLowerCase(), user]),
-      );
-      for (const user of fetched) {
-        if (user.id !== currentUpload?.id) rssByHandle.set(user.handle.toLowerCase(), deriveUserActivity(user));
-      }
-      const nextUsers = [...users.filter((user) => user.source !== "rss"), ...rssByHandle.values()];
-      setUsers(nextUsers);
       setActiveId(currentUpload?.id ?? fetched[0]?.id ?? "");
       setTab(currentUpload ? targetTab : "overview");
       setStatus(
@@ -601,6 +704,14 @@ export default function App() {
     if (!activeUser || !tmdbToken.trim()) return;
     setTmdbLoading(true);
     setStatus("");
+    const started: TmdbRunState = {
+      phase: "validating",
+      message: language === "tr" ? "Read Access Token TMDB ile dogrulaniyor." : "Validating the Read Access Token with TMDB.",
+      processed: 0,
+      total: 0,
+      enriched: 0,
+    };
+    setTmdbRun(started);
     try {
       const validation = await fetch("/api/tmdb/validate", {
         method: "POST",
@@ -612,8 +723,16 @@ export default function App() {
       localStorage.setItem("tastetwin.tmdbToken", tmdbToken.trim());
 
       const films = activeUser.films.filter((film) => film.watchlist || (film.rating ?? 0) >= 4);
+      if (!films.length) throw new Error("zenginlestirilecek_puanli_veya_watchlist_filmi_yok");
       const metadata = new Map<string, Partial<FilmSignal>>();
       const batchSize = 25;
+      setTmdbRun({
+        phase: "enriching",
+        message: language === "tr" ? `Token dogrulandi. ${films.length} film TMDB'de araniyor.` : `Token validated. Looking up ${films.length} films on TMDB.`,
+        processed: 0,
+        total: films.length,
+        enriched: 0,
+      });
       for (let offset = 0; offset < films.length; offset += batchSize) {
         setStatus(
           language === "tr"
@@ -628,6 +747,13 @@ export default function App() {
         const payload = await response.json().catch(() => ({}));
         if (!response.ok) throw new Error(payload.error ?? "tmdb_enrich_failed");
         for (const item of payload.results ?? []) metadata.set(item.key, item);
+        setTmdbRun({
+          phase: "enriching",
+          message: language === "tr" ? "Token dogrulandi; yonetmen, anahtar kelime ve benzer film verisi aliniyor." : "Token validated; loading directors, keywords and related films.",
+          processed: Math.min(offset + batchSize, films.length),
+          total: films.length,
+          enriched: metadata.size,
+        });
         await new Promise((resolve) => window.setTimeout(resolve, 0));
       }
 
@@ -649,8 +775,28 @@ export default function App() {
           ? `${metadata.size} filme TMDB yonetmen, anahtar kelime ve onerileri eklendi.`
           : `Added TMDB directors, keywords and recommendations to ${metadata.size} films.`,
       );
+      const completed: TmdbRunState = {
+        phase: "done",
+        message: language === "tr" ? "Token dogrulandi ve TMDB verisi uygulamaya kaydedildi." : "Token validated and TMDB data was saved to the app.",
+        processed: films.length,
+        total: films.length,
+        enriched: metadata.size,
+        lastRun: new Date().toISOString(),
+      };
+      setTmdbRun(completed);
+      localStorage.setItem("tastetwin.tmdbRun", JSON.stringify(completed));
     } catch (error) {
       console.error(error);
+      const failed: TmdbRunState = {
+        phase: "error",
+        message: error instanceof Error ? error.message : "unknown_error",
+        processed: 0,
+        total: 0,
+        enriched: 0,
+        lastRun: new Date().toISOString(),
+      };
+      setTmdbRun(failed);
+      localStorage.setItem("tastetwin.tmdbRun", JSON.stringify(failed));
       setStatus(
         language === "tr"
           ? `TMDB islemi tamamlanamadi: ${error instanceof Error ? error.message : "bilinmeyen hata"}`
@@ -733,17 +879,9 @@ export default function App() {
             <BarChart3 size={18} />
             <span>{t(language, "navOverview")}</span>
           </button>
-          <button className={tab === "matches" ? "active" : ""} onClick={() => setTab("matches")}>
-            <Users size={18} />
-            <span>{t(language, "navMatches")}</span>
-          </button>
           <button className={tab === "social" ? "active" : ""} onClick={() => setTab("social")}>
             <UserCheck size={18} />
-            <span>{language === "tr" ? "Sosyal ag" : "Social graph"}</span>
-          </button>
-          <button className={tab === "profile" ? "active" : ""} onClick={() => setTab("profile")}>
-            <Globe2 size={18} />
-            <span>{t(language, "navProfile")}</span>
+            <span>{language === "tr" ? "Sosyal" : "Social"}</span>
           </button>
         </nav>
 
@@ -757,12 +895,16 @@ export default function App() {
             placeholder="kullaniciadi"
             onChange={(event) => setAccountHandle(event.target.value)}
             onKeyDown={(event) => {
-              if (event.key === "Enter") fetchSocialData("extension");
+              if (event.key === "Enter") openLetterboxdAndScan();
             }}
           />
-          <button className="primary-button" onClick={() => fetchSocialData("extension")} disabled={socialLoading || loading}>
+          <button className="primary-button" onClick={openLetterboxdAndScan} disabled={socialLoading || loading}>
+            {socialLoading ? <Loader2 className="spin" size={18} /> : <Globe2 size={18} />}
+            <span>{language === "tr" ? "Letterboxd'u ac ve otomatik tara" : "Open Letterboxd and scan"}</span>
+          </button>
+          <button className="browser-scan-button" onClick={() => fetchSocialData("extension")} disabled={socialLoading || loading}>
             {socialLoading ? <Loader2 className="spin" size={18} /> : <Link2 size={18} />}
-            <span>{language === "tr" ? "Eklenti taramasini al" : "Load extension scan"}</span>
+            <span>{language === "tr" ? "Son eklenti taramasini yukle" : "Load latest extension scan"}</span>
           </button>
           <button className="browser-scan-button" onClick={() => fetchSocialData("public")} disabled={socialLoading || loading}>
             <Globe2 size={17} />
@@ -795,8 +937,8 @@ export default function App() {
           </summary>
           <ol>
             <li>{language === "tr" ? "Letterboxd export ZIP'ini Tam film arsivi ile yukle." : "Load your Letterboxd export ZIP as the full archive."}</li>
-            <li>{language === "tr" ? "Eklentiyi kendi profilinde calistir; sonra Eklenti taramasini al." : "Run the extension on your profile, then load its scan."}</li>
-            <li>{language === "tr" ? "Sosyal agdan takip durumunu, Zevk eslesmelerinden puanli karsilastirmayi ac." : "Use Social graph for follow status and Taste matches for rated comparisons."}</li>
+            <li>{language === "tr" ? "Letterboxd'u ac ve otomatik tara dugmesine bas; profil acilinca guncel eklenti taramasi kendisi baslar." : "Press Open Letterboxd and scan; the extension starts when your profile opens."}</li>
+            <li>{language === "tr" ? "Sosyal ekraninda takip durumu, degisim gecmisi, aktiflik ve zevk puanlarini birlikte filtrele." : "Filter relationships, history, activity and taste scores together in Social."}</li>
           </ol>
         </details>
 
@@ -818,8 +960,26 @@ export default function App() {
           />
           <button className="primary-button" onClick={enrichWithTmdb} disabled={!activeUser || !tmdbToken.trim() || tmdbLoading}>
             {tmdbLoading ? <Loader2 className="spin" size={17} /> : <Sparkles size={17} />}
-            <span>{language === "tr" ? "Dogrula ve metadata ekle" : "Validate and enrich"}</span>
+            <span>{language === "tr" ? "Tokeni dogrula ve filmleri zenginlestir" : "Validate token and enrich films"}</span>
           </button>
+          <div className={`tmdb-run-status tmdb-${tmdbRun.phase}`} aria-live="polite">
+            <strong>
+              {tmdbRun.phase === "done"
+                ? language === "tr" ? "TMDB calisiyor" : "TMDB is working"
+                : tmdbRun.phase === "error"
+                  ? language === "tr" ? "TMDB hatasi" : "TMDB error"
+                  : tmdbRun.phase === "idle"
+                    ? language === "tr" ? "Henuz dogrulanmadi" : "Not validated yet"
+                    : language === "tr" ? "TMDB isleniyor" : "TMDB processing"}
+            </strong>
+            <span>{tmdbRun.message}</span>
+            {tmdbRun.total > 0 && <progress max={tmdbRun.total} value={tmdbRun.processed} />}
+            <small>
+              {language === "tr"
+                ? `${tmdbRun.enriched} film zenginlestirildi${tmdbRun.lastRun ? ` · son calisma ${new Date(tmdbRun.lastRun).toLocaleString("tr-TR")}` : ""}`
+                : `${tmdbRun.enriched} films enriched${tmdbRun.lastRun ? ` · last run ${new Date(tmdbRun.lastRun).toLocaleString("en-US")}` : ""}`}
+            </small>
+          </div>
           <a href="https://www.themoviedb.org/settings/api" target="_blank" rel="noreferrer">
             {language === "tr" ? "TMDB token alma sayfasi" : "Get a TMDB token"}
           </a>
@@ -1093,7 +1253,10 @@ export default function App() {
                 onUseFollowing={useFollowingAsMatchCandidates}
                 onUseNetwork={useNetworkAsMatchCandidates}
                 users={users}
+                matches={matches}
                 onLoadActivity={loadSocialActivity}
+                activityScanProgress={activityScanProgress}
+                onSelectMatch={setSelectedMatch}
                 networkCandidateLimit={networkCandidateLimit}
                 onNetworkCandidateLimitChange={setNetworkCandidateLimit}
                 onResetHistory={resetFollowerHistory}
@@ -1190,7 +1353,10 @@ function SocialPanel({
   onUseFollowing,
   onUseNetwork,
   users,
+  matches,
   onLoadActivity,
+  activityScanProgress,
+  onSelectMatch,
   networkCandidateLimit,
   onNetworkCandidateLimitChange,
   onResetHistory,
@@ -1202,7 +1368,10 @@ function SocialPanel({
   onUseFollowing: () => void;
   onUseNetwork: () => void;
   users: UserTaste[];
+  matches: MatchResult[];
   onLoadActivity: (handles: string[], members: SocialMember[]) => void;
+  activityScanProgress?: ActivityScanProgress;
+  onSelectMatch: (match: MatchResult) => void;
   networkCandidateLimit: number;
   onNetworkCandidateLimitChange: (value: number) => void;
   onResetHistory: () => void;
@@ -1247,25 +1416,15 @@ function SocialPanel({
       ? `${new Date(data.previousCheckedAt).toLocaleString("tr-TR")} ile ${new Date(data.checkedAt).toLocaleString("tr-TR")} arasinda degismis olabilir. Kesin an bilinmez.`
       : `May have changed between ${new Date(data.previousCheckedAt).toLocaleString("en-US")} and ${new Date(data.checkedAt).toLocaleString("en-US")}. The exact moment is unknown.`
     : undefined;
-  const groups = [
-    { label: language === "tr" ? "Takip ettikleri" : "Following", value: data.counts.following },
-    { label: language === "tr" ? "Takipciler" : "Followers", value: data.counts.followers },
-    { label: language === "tr" ? "Karsilikli" : "Mutuals", value: data.counts.mutuals },
-    { label: language === "tr" ? "Seni takip etmeyenler" : "Not following back", value: data.counts.notFollowingBack },
-    { label: language === "tr" ? "Senin takip etmediklerin" : "Fans", value: data.counts.fans },
-    { label: language === "tr" ? "Takipten cikanlar" : "Lost followers", value: data.lostFollowers.length },
-    { label: language === "tr" ? "Yeni takipciler" : "New followers", value: data.newFollowers.length },
-  ];
-
   return (
     <section className="social-layout">
       <div className="panel social-actions">
         <div>
-          <h2>{language === "tr" ? "Takip ettiklerine gore eslestir" : "Match against following"}</h2>
+          <h2>{language === "tr" ? "Takip ettiklerinin film verisi" : "Film data for people you follow"}</h2>
           <p className="muted-line">
             {language === "tr"
-              ? `${data.source === "official-api" ? "Resmi API" : data.source === "browser-extension" ? "TasteTwin Chrome eklentisi" : data.source === "browser-session" ? "Tam tarayici oturumu" : "Halka acik profil sayfalari"} kullanildi. Takip ettiklerinin son film aktiviteleri zevk eslesmesine alinir.`
-              : `${data.source === "official-api" ? "Official API" : data.source === "browser-extension" ? "TasteTwin Chrome extension" : data.source === "browser-session" ? "Full browser session" : "Public profile pages"} used. Recent film activity from your following is used for taste matching.`}
+              ? `${data.source === "official-api" ? "Resmi API" : data.source === "browser-extension" ? "TasteTwin Chrome eklentisi" : data.source === "browser-session" ? "Tam tarayici oturumu" : "Halka acik profil sayfalari"} kullanildi. Film verisi alinan kisiler ayni sosyal listede zevk puaniyla siralanabilir.`
+              : `${data.source === "official-api" ? "Official API" : data.source === "browser-extension" ? "TasteTwin Chrome extension" : data.source === "browser-session" ? "Full browser session" : "Public profile pages"} used. People with film data can be sorted by taste score in the same social list.`}
           </p>
           <p className="muted-line">
             {language === "tr" ? "Son basarili tarama" : "Last successful scan"}: {new Date(data.checkedAt).toLocaleString(language === "tr" ? "tr-TR" : "en-US")}
@@ -1273,7 +1432,7 @@ function SocialPanel({
         </div>
         <button className="primary-button" onClick={onUseFollowing} disabled={loading}>
           {loading ? <Loader2 className="spin" size={18} /> : <Search size={18} />}
-          <span>{language === "tr" ? "Eslestir" : "Match"}</span>
+          <span>{language === "tr" ? "Film verilerini al" : "Load film data"}</span>
         </button>
       </div>
       {data.network && (
@@ -1282,8 +1441,8 @@ function SocialPanel({
             <h2>{language === "tr" ? "Iki halkali ag" : "Two-hop network"}</h2>
             <p className="muted-line">
               {language === "tr"
-              ? `${data.network.nodes} hesap, ${data.network.edges} bag ve ${data.network.candidateCount ?? "?"} yeni aday kaydedildi${data.network.capped ? "; 10.000 dugume ulasti" : ""}. ${data.network.connectorsScanned ?? "?"} baglayici tarandi. Takip ettigin ve seni takip eden hesaplar agda tohumdur; onerilen adaylar bu dogrudan listelerin disindadir.`
-              : `${data.network.nodes} accounts, ${data.network.edges} edges and ${data.network.candidateCount ?? "?"} new candidates saved${data.network.capped ? "; reached 10,000 nodes" : ""}. ${data.network.connectorsScanned ?? "?"} connectors scanned. Your following and followers seed the graph; suggested candidates exclude those direct lists.`}
+              ? `${data.network.nodes} hesap, ${data.network.edges} bag ve ${data.network.candidateCount ?? "?"} yeni aday kaydedildi${data.network.capped ? "; 10.000 dugume ulasti" : ""}. ${data.network.connectorsScanned ?? "?"} baglayici tarandi. Kesif yalniz senin takip ettiklerinden gunluk rastgele ve dengeli bir ornekle baslar; her baglayicidan sinirli hesap alinir.`
+              : `${data.network.nodes} accounts, ${data.network.edges} edges and ${data.network.candidateCount ?? "?"} new candidates saved${data.network.capped ? "; reached 10,000 nodes" : ""}. ${data.network.connectorsScanned ?? "?"} connectors scanned. Discovery starts from a daily balanced random sample of only the people you follow, with a per-connector limit.`}
             </p>
             {data.network.completedAt && (
               <strong>
@@ -1312,15 +1471,6 @@ function SocialPanel({
           </div>
         </div>
       )}
-      <div className="stats-grid social-stats">
-        {groups.map(({ label, value }) => (
-          <div className="stat-tile" key={label}>
-            <Users size={18} />
-            <strong>{value}</strong>
-            <span>{label}</span>
-          </div>
-        ))}
-      </div>
       <div className="panel history-explainer">
         <div>
           <h2>{language === "tr" ? "Takip degisiklikleri nasil bulunuyor?" : "How follow changes are detected"}</h2>
@@ -1337,6 +1487,17 @@ function SocialPanel({
                 : "This scan is saved as the baseline."}
           </strong>
           {changeWindow && <p className="history-window">{changeWindow}</p>}
+          {data.history && data.history.length > 0 && (
+            <div className="scan-history-list">
+              {data.history.slice(-5).reverse().map((scan) => (
+                <span key={scan.checkedAt}>
+                  <time>{new Date(scan.checkedAt).toLocaleString(language === "tr" ? "tr-TR" : "en-US")}</time>
+                  <b>{scan.following} / {scan.followers}</b>
+                  <small>+{scan.newFollowers} / -{scan.lostFollowers}</small>
+                </span>
+              ))}
+            </div>
+          )}
         </div>
         <button className="browser-scan-button" onClick={onResetHistory}>
           <RefreshCcw size={17} />
@@ -1363,8 +1524,11 @@ function SocialPanel({
         language={language}
         data={data}
         users={users}
+        matches={matches}
         loading={loading}
         onLoadActivity={onLoadActivity}
+        activityScanProgress={activityScanProgress}
+        onSelectMatch={onSelectMatch}
       />
     </section>
   );
@@ -1374,20 +1538,28 @@ function SocialDirectory({
   language,
   data,
   users,
+  matches,
   loading,
   onLoadActivity,
+  activityScanProgress,
+  onSelectMatch,
 }: {
   language: Language;
   data: AvailableSocialData;
   users: UserTaste[];
+  matches: MatchResult[];
   loading: boolean;
   onLoadActivity: (handles: string[], members: SocialMember[]) => void;
+  activityScanProgress?: ActivityScanProgress;
+  onSelectMatch: (match: MatchResult) => void;
 }) {
   const [query, setQuery] = useState("");
   const [myFollow, setMyFollow] = useState<RelationshipFilter>("any");
   const [followsMe, setFollowsMe] = useState<RelationshipFilter>("any");
   const [source, setSource] = useState<"all" | "direct" | "network">("all");
   const [activity, setActivity] = useState<"any" | "known" | "unknown">("any");
+  const [category, setCategory] = useState<SocialDirectoryFilters["category"]>("all");
+  const [minTaste, setMinTaste] = useState(0);
   const [sort, setSort] = useState<SocialDirectorySort>("relationship");
   const [pageSize, setPageSize] = useState(100);
   const [page, setPage] = useState(1);
@@ -1398,12 +1570,12 @@ function SocialDirectory({
       newFollowers: data.newFollowers,
       lostFollowers: data.lostFollowers,
       networkCandidates: data.networkCandidates,
-    }, users),
-    [data, users],
+    }, users, matches),
+    [data, matches, users],
   );
   const filtered = useMemo(
-    () => filterAndSortSocialDirectory(directory, { query, myFollow, followsMe, source, activity, sort }),
-    [activity, directory, followsMe, myFollow, query, sort, source],
+    () => filterAndSortSocialDirectory(directory, { query, myFollow, followsMe, source, activity, category, minTaste, sort }),
+    [activity, category, directory, followsMe, minTaste, myFollow, query, sort, source],
   );
   const pagination = useMemo(
     () => paginateSocialDirectory(filtered, page, pageSize),
@@ -1412,17 +1584,33 @@ function SocialDirectory({
 
   useEffect(() => {
     setPage(1);
-  }, [activity, followsMe, myFollow, pageSize, query, sort, source]);
+  }, [activity, category, followsMe, minTaste, myFollow, pageSize, query, sort, source]);
 
   const activityKnown = filtered.filter((entry) => entry.activity?.lastActivityAt).length;
-  const filteredMembers = filtered.map(directoryEntryToMember);
+  const missingActivity = directory.filter((entry) => !entry.activity?.lastActivityAt);
+  const missingActivityMembers = missingActivity.map(directoryEntryToMember);
+  const categories: Array<{
+    id: SocialDirectoryFilters["category"];
+    label: string;
+    value: number;
+  }> = [
+    { id: "all", label: language === "tr" ? "Tum sosyal veriler" : "All people", value: directory.length },
+    { id: "following", label: language === "tr" ? "Takip ettiklerin" : "Following", value: data.counts.following },
+    { id: "followers", label: language === "tr" ? "Takipcilerin" : "Followers", value: data.counts.followers },
+    { id: "mutuals", label: language === "tr" ? "Karsilikli" : "Mutuals", value: data.counts.mutuals },
+    { id: "not-following-back", label: language === "tr" ? "Seni takip etmeyen" : "Not following back", value: data.counts.notFollowingBack },
+    { id: "fans", label: language === "tr" ? "Senin takip etmedigin" : "You do not follow", value: data.counts.fans },
+    { id: "new", label: language === "tr" ? "Yeni takipci" : "New followers", value: data.newFollowers.length },
+    { id: "lost", label: language === "tr" ? "Takipten cikan" : "Lost followers", value: data.lostFollowers.length },
+    { id: "network", label: language === "tr" ? "Agdan bulunan" : "Network discoveries", value: directory.filter((entry) => entry.inNetwork && !entry.myFollow && !entry.followsMe).length },
+  ];
 
   return (
     <div className="panel social-directory">
       <div className="panel-title social-directory-title">
         <UserCheck size={18} />
         <div>
-          <h2>{language === "tr" ? "Baglantilarini yonet" : "Manage your connections"}</h2>
+          <h2>{language === "tr" ? "Sosyal veriler" : "Social data"}</h2>
           <p>
             {language === "tr"
               ? `${directory.length} tekil hesap; film verisi olmayanlar da dahildir.`
@@ -1430,6 +1618,19 @@ function SocialDirectory({
           </p>
         </div>
         <strong>{filtered.length}</strong>
+      </div>
+      <div className="social-category-grid" aria-label={language === "tr" ? "Sosyal kategoriler" : "Social categories"}>
+        {categories.map((item) => (
+          <button
+            key={item.id}
+            className={category === item.id ? "active" : ""}
+            onClick={() => setCategory(item.id)}
+          >
+            <Users size={17} />
+            <strong>{item.value}</strong>
+            <span>{item.label}</span>
+          </button>
+        ))}
       </div>
       <div className="social-directory-filters">
         <label className="member-search">
@@ -1473,11 +1674,18 @@ function SocialDirectory({
           ]}
         />
         <DirectorySelect
+          label={language === "tr" ? "En az zevk puani" : "Minimum taste"}
+          value={String(minTaste)}
+          onChange={(value) => setMinTaste(Number(value))}
+          options={[0, 40, 50, 60, 70, 80, 90].map((score) => [String(score), score ? `${score}+` : language === "tr" ? "Fark etmez" : "Any"])}
+        />
+        <DirectorySelect
           label={language === "tr" ? "Sirala" : "Sort"}
           value={sort}
           onChange={(value) => setSort(value as SocialDirectorySort)}
           options={[
             ["relationship", language === "tr" ? "Iliski onceligi" : "Relationship"],
+            ["taste", language === "tr" ? "Zevk ve oneri puani" : "Taste and recommendation"],
             ["active", language === "tr" ? "En aktif" : "Most active"],
             ["inactive", language === "tr" ? "En uzun suredir pasif" : "Least active"],
             ["connections", language === "tr" ? "Ortak baglanti" : "Mutual links"],
@@ -1499,18 +1707,28 @@ function SocialDirectory({
         </span>
         <button
           className="browser-scan-button"
-          disabled={loading || !filtered.length}
-          onClick={() => onLoadActivity(filtered.map((entry) => entry.username), filteredMembers)}
+          disabled={loading || !missingActivity.length}
+          onClick={() => onLoadActivity(missingActivity.map((entry) => entry.username), missingActivityMembers)}
         >
           {loading ? <Loader2 className="spin" size={16} /> : <RefreshCcw size={16} />}
           <span>
             {language === "tr"
-              ? `Filtrelenen ${filtered.length} kisinin aktifligini tara`
-              : `Scan activity for ${filtered.length} filtered people`}
+              ? `Eksik ${missingActivity.length} kisinin aktifligini tamamla`
+              : `Complete activity for ${missingActivity.length} people`}
           </span>
         </button>
       </div>
-      <SocialDirectoryList entries={pagination.items} language={language} />
+      {activityScanProgress && activityScanProgress.total > 0 && (
+        <div className="activity-progress" aria-live="polite">
+          <progress value={activityScanProgress.processed} max={activityScanProgress.total} />
+          <span>
+            {language === "tr"
+              ? `${activityScanProgress.processed}/${activityScanProgress.total} denendi · ${activityScanProgress.loaded} alindi · ${activityScanProgress.failed} alinamadi. Her parti otomatik kaydedilir.`
+              : `${activityScanProgress.processed}/${activityScanProgress.total} attempted · ${activityScanProgress.loaded} loaded · ${activityScanProgress.failed} failed. Every batch is saved automatically.`}
+          </span>
+        </div>
+      )}
+      <SocialDirectoryList entries={pagination.items} language={language} onSelectMatch={onSelectMatch} />
       {filtered.length > 0 && (
         <nav className="match-pagination directory-pagination">
           <button disabled={pagination.page <= 1} onClick={() => setPage((current) => Math.max(1, current - 1))}>
@@ -1537,9 +1755,11 @@ function SocialDirectory({
 function SocialDirectoryList({
   entries,
   language,
+  onSelectMatch,
 }: {
   entries: SocialDirectoryEntry[];
   language: Language;
+  onSelectMatch: (match: MatchResult) => void;
 }) {
   if (!entries.length) return <p className="empty-state">0</p>;
   return (
@@ -1560,9 +1780,29 @@ function SocialDirectoryList({
             {entry.isLostFollower && <span className="relation-lost">{language === "tr" ? "Cikmis" : "Lost"}</span>}
           </div>
           <div className="directory-score">
-            {entry.activity?.activityScore !== undefined && <strong>{entry.activity.activityScore}</strong>}
+            {entry.match ? (
+              <>
+                <strong>{entry.match.recommendationScore}</strong>
+                <small>{language === "tr" ? `zevk ${entry.match.score}` : `taste ${entry.match.score}`}</small>
+              </>
+            ) : entry.activity?.activityScore !== undefined ? (
+              <>
+                <strong>{entry.activity.activityScore}</strong>
+                <small>{language === "tr" ? "aktiflik" : "activity"}</small>
+              </>
+            ) : null}
             {(entry.connections ?? 0) > 0 && <small>{entry.connections} {language === "tr" ? "ortak" : "links"}</small>}
           </div>
+          {entry.match && (
+            <button
+              className="profile-arrow match-detail-button"
+              onClick={() => onSelectMatch(entry.match!)}
+              title={language === "tr" ? "Ortak filmleri ve puanlari ac" : "Open shared films and ratings"}
+              aria-label={language === "tr" ? `${entry.displayName} zevk detayini ac` : `Open taste details for ${entry.displayName}`}
+            >
+              <Search size={18} />
+            </button>
+          )}
           <a
             className="profile-arrow"
             href={`https://letterboxd.com/${entry.username}/`}
@@ -1902,6 +2142,21 @@ function MatchDetail({
             : `${match.commonCount} co-rated films, ${match.confidence}% validity. Raw affinity ${match.rawScore}; repeated-split penalty -${match.divergencePenalty}; local niche score ${match.nicheScore}/100. Sparse evidence pulls the score toward 50. Watchlist and unrated films are excluded.`}
         </p>
 
+        {match.togetherPick && (
+          <div className="together-pick detail-together-pick">
+            <span>{language === "tr" ? "Birlikte izleyin" : "Watch together"}</span>
+            <strong>{match.togetherPick.film.title}</strong>
+            <small>
+              {match.togetherPick.reason ||
+                (match.togetherPick.kind === "mutual-watchlist"
+                  ? language === "tr" ? "Film ikinizin de watchlistinde." : "The film is on both watchlists."
+                  : match.togetherPick.kind === "your-watchlist-they-loved"
+                    ? language === "tr" ? "Senin watchlistinde; bu kisi filmi sevdi." : "On your watchlist; this person loved it."
+                    : language === "tr" ? "Ortak zevkinize en yakin watchlist adayi." : "The closest watchlist fit for your shared taste.")}
+            </small>
+          </div>
+        )}
+
         <div className="detail-section">
           <h3>{language === "tr" ? "Ortak filmler ve puanlar" : "Common films and ratings"}</h3>
           <div className="rating-table">
@@ -2207,7 +2462,16 @@ function cleanSocialMembers(value: unknown): SocialMember[] | undefined {
 
 function addFollowerChanges(handle: string, payload: AvailableSocialData): AvailableSocialData {
   const key = `tastetwin.followers.${handle}`;
-  let previous: { checkedAt: string; followers: SocialMember[] } | undefined;
+  type FollowerSnapshot = {
+    checkedAt: string;
+    followers: SocialMember[];
+    scanStage?: AvailableSocialData["scanStage"];
+    comparisonPreviousCheckedAt?: string;
+    lostFollowers?: SocialMember[];
+    newFollowers?: SocialMember[];
+    history?: AvailableSocialData["history"];
+  };
+  let previous: FollowerSnapshot | undefined;
   try {
     previous = JSON.parse(localStorage.getItem(key) ?? "null") ?? undefined;
   } catch {
@@ -2220,22 +2484,71 @@ function addFollowerChanges(handle: string, payload: AvailableSocialData): Avail
       previousCheckedAt: previous?.checkedAt,
       lostFollowers: [],
       newFollowers: [],
+      history: previous?.history ?? [],
     };
   }
 
   const currentNames = new Set(payload.followers.map((member) => member.username.toLowerCase()));
+  const sameFollowers =
+    previous?.followers.length === payload.followers.length &&
+    previous.followers.every((member) => currentNames.has(member.username.toLowerCase()));
+  if (
+    payload.scanStage === "network-complete" &&
+    previous?.scanStage === "social-complete" &&
+    sameFollowers
+  ) {
+    const history = [...(previous.history ?? [])];
+    const latest = history[history.length - 1];
+    if (latest) latest.networkCandidates = payload.network?.candidateCount;
+    const snapshot: FollowerSnapshot = {
+      ...previous,
+      checkedAt: payload.checkedAt,
+      scanStage: "network-complete",
+      history,
+    };
+    localStorage.setItem(key, JSON.stringify(snapshot));
+    return {
+      ...payload,
+      previousCheckedAt: previous.comparisonPreviousCheckedAt,
+      lostFollowers: previous.lostFollowers ?? [],
+      newFollowers: previous.newFollowers ?? [],
+      history,
+    };
+  }
+
   const previousNames = new Set((previous?.followers ?? []).map((member) => member.username.toLowerCase()));
   const lostFollowers = previous?.followers.filter((member) => !currentNames.has(member.username.toLowerCase())) ?? [];
   const newFollowers = previous
     ? payload.followers.filter((member) => !previousNames.has(member.username.toLowerCase()))
     : [];
+  const history = [
+    ...(previous?.history ?? []),
+    {
+      checkedAt: payload.checkedAt,
+      following: payload.counts.following,
+      followers: payload.counts.followers,
+      mutuals: payload.counts.mutuals,
+      newFollowers: newFollowers.length,
+      lostFollowers: lostFollowers.length,
+      networkCandidates: payload.network?.candidateCount,
+    },
+  ].slice(-50);
 
-  localStorage.setItem(key, JSON.stringify({ checkedAt: payload.checkedAt, followers: payload.followers }));
+  localStorage.setItem(key, JSON.stringify({
+    checkedAt: payload.checkedAt,
+    followers: payload.followers,
+    scanStage: payload.scanStage,
+    comparisonPreviousCheckedAt: previous?.checkedAt,
+    lostFollowers,
+    newFollowers,
+    history,
+  } satisfies FollowerSnapshot));
   return {
     ...payload,
     previousCheckedAt: previous?.checkedAt,
     lostFollowers,
     newFollowers,
+    history,
   };
 }
 
@@ -2272,6 +2585,19 @@ function deriveUserActivity(user: UserTaste): UserTaste {
   };
 }
 
+function mergeRssUsers(current: UserTaste[], incoming: UserTaste[]) {
+  const uploaded = current.filter((user) => user.source !== "rss");
+  const rss = new Map(
+    current
+      .filter((user) => user.source === "rss")
+      .map((user) => [user.handle.toLowerCase(), user]),
+  );
+  for (const user of incoming) {
+    rss.set(user.handle.toLowerCase(), deriveUserActivity(user));
+  }
+  return [...uploaded, ...rss.values()];
+}
+
 function loadStoredSocial(): Record<string, SocialData> {
   try {
     const value = JSON.parse(localStorage.getItem("tastetwin.social") ?? "{}");
@@ -2279,6 +2605,7 @@ function loadStoredSocial(): Record<string, SocialData> {
       if (!data.available) continue;
       data.lostFollowers ??= [];
       data.newFollowers ??= [];
+      data.history ??= [];
     }
     return value;
   } catch {

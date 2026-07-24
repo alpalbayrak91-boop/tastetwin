@@ -29,15 +29,52 @@ const browserUserAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/
 const socialCache = new Map();
 const bridgeCache = new Map();
 const tmdbCache = new Map();
+let pendingExtensionScan;
 const SOCIAL_CACHE_MS = 5 * 60 * 1000;
 const BRIDGE_CACHE_MS = 30 * 24 * 60 * 60 * 1000;
 const PUBLIC_SOCIAL_PAGE_LIMIT = 8;
+const PENDING_SCAN_MS = 15 * 60 * 1000;
 
 await Promise.all([restoreBridgeCache(), restoreTmdbCache()]);
 
 const server = createServer(async (req, res) => {
   try {
     const url = new URL(req.url ?? "/", `http://${req.headers.host ?? "127.0.0.1"}`);
+
+    if (url.pathname === "/api/extension/request-scan" && req.method === "POST") {
+      if (req.headers["x-tastetwin-request"] !== "app") {
+        sendJson(res, 403, { error: "app_request_required" });
+        return;
+      }
+      const body = await readJsonBody(req);
+      const handle = String(body.handle ?? "").trim().replace(/^@/, "").toLowerCase();
+      if (!/^[a-z0-9_-]{2,32}$/.test(handle)) {
+        sendJson(res, 400, { error: "invalid_handle" });
+        return;
+      }
+      pendingExtensionScan = {
+        handle,
+        mode: "full",
+        requestedAt: new Date().toISOString(),
+        expiresAt: Date.now() + PENDING_SCAN_MS,
+      };
+      sendJson(res, 200, { ok: true, ...pendingExtensionScan });
+      return;
+    }
+
+    if (url.pathname === "/api/extension/claim-scan" && req.method === "POST") {
+      const body = await readJsonBody(req);
+      const handle = String(body.handle ?? "").trim().replace(/^@/, "").toLowerCase();
+      const pending =
+        pendingExtensionScan &&
+        pendingExtensionScan.expiresAt > Date.now() &&
+        pendingExtensionScan.handle === handle
+          ? pendingExtensionScan
+          : undefined;
+      if (pending) pendingExtensionScan = undefined;
+      sendJson(res, 200, pending ? { pending: true, mode: pending.mode, requestedAt: pending.requestedAt } : { pending: false });
+      return;
+    }
 
     if (url.pathname === "/api/system/prepare-extension" && req.method === "POST") {
       if (req.headers["x-tastetwin-request"] !== "app") {
@@ -324,6 +361,10 @@ function socialFromExtension(payload) {
     complete: true,
     warning: "Complete graph scanned by the local TasteTwin browser extension. No Letterboxd password was collected.",
   });
+  social.scanStage =
+    payload.scanStage === "social-complete" || payload.scanStage === "network-complete"
+      ? payload.scanStage
+      : undefined;
   if (typeof payload.capturedAt === "string" && !Number.isNaN(Date.parse(payload.capturedAt))) {
     social.checkedAt = payload.capturedAt;
   }
@@ -786,6 +827,7 @@ async function restoreBridgeCache() {
         following: raw.following,
         followers: raw.followers,
         capturedAt: raw.checkedAt,
+        scanStage: raw.scanStage,
         network: Array.isArray(raw.networkHandles)
           ? { ...raw.network, handles: raw.networkHandles, candidates: raw.networkCandidates }
           : undefined,

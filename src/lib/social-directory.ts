@@ -1,4 +1,4 @@
-import type { UserTaste } from "../types";
+import type { MatchResult, UserTaste } from "../types";
 
 export type SocialMemberRecord = {
   id?: string;
@@ -18,12 +18,14 @@ export type SocialDirectoryEntry = SocialMemberRecord & {
   isNewFollower: boolean;
   isLostFollower: boolean;
   activity?: UserTaste;
+  match?: MatchResult;
 };
 
 export type SocialDirectorySort =
   | "relationship"
   | "active"
   | "inactive"
+  | "taste"
   | "connections"
   | "name";
 
@@ -33,6 +35,17 @@ export type SocialDirectoryFilters = {
   followsMe: "any" | "yes" | "no";
   source: "all" | "direct" | "network";
   activity: "any" | "known" | "unknown";
+  category:
+    | "all"
+    | "following"
+    | "followers"
+    | "mutuals"
+    | "not-following-back"
+    | "fans"
+    | "new"
+    | "lost"
+    | "network";
+  minTaste: number;
   sort: SocialDirectorySort;
 };
 
@@ -47,6 +60,7 @@ type SocialDirectorySource = {
 export function buildSocialDirectory(
   source: SocialDirectorySource,
   users: UserTaste[],
+  matches: MatchResult[] = [],
 ): SocialDirectoryEntry[] {
   const following = new Set(source.following.map(keyOf));
   const followers = new Set(source.followers.map(keyOf));
@@ -57,6 +71,7 @@ export function buildSocialDirectory(
       .filter((user) => user.source === "rss")
       .map((user) => [user.handle.toLowerCase(), user]),
   );
+  const matchByHandle = new Map(matches.map((match) => [match.user.handle.toLowerCase(), match]));
   const records = new Map<string, SocialMemberRecord & { inNetwork: boolean }>();
 
   for (const [members, inNetwork] of [
@@ -91,6 +106,7 @@ export function buildSocialDirectory(
     isNewFollower: newFollowers.has(key),
     isLostFollower: lostFollowers.has(key),
     activity: activityByHandle.get(key),
+    match: matchByHandle.get(key),
   }));
 }
 
@@ -111,7 +127,9 @@ export function filterAndSortSocialDirectory(
         (filters.source === "all" ||
           (filters.source === "direct" ? direct : entry.inNetwork && !direct)) &&
         (filters.activity === "any" ||
-          (filters.activity === "known" ? Boolean(entry.activity?.lastActivityAt) : !entry.activity?.lastActivityAt))
+          (filters.activity === "known" ? Boolean(entry.activity?.lastActivityAt) : !entry.activity?.lastActivityAt)) &&
+        categoryMatches(filters.category, entry) &&
+        (filters.minTaste <= 0 || (entry.match?.score ?? -1) >= filters.minTaste)
       );
     })
     .sort((a, b) => compareEntries(a, b, filters.sort));
@@ -152,6 +170,13 @@ function compareEntries(
       a.username.localeCompare(b.username)
     );
   }
+  if (sort === "taste") {
+    return (
+      (b.match?.recommendationScore ?? -1) - (a.match?.recommendationScore ?? -1) ||
+      (b.match?.score ?? -1) - (a.match?.score ?? -1) ||
+      a.username.localeCompare(b.username)
+    );
+  }
   if (sort === "name") return a.displayName.localeCompare(b.displayName);
 
   const relationshipRank = (entry: SocialDirectoryEntry) =>
@@ -171,6 +196,21 @@ function compareEntries(
     (b.activity?.activityScore ?? -1) - (a.activity?.activityScore ?? -1) ||
     a.username.localeCompare(b.username)
   );
+}
+
+function categoryMatches(
+  category: SocialDirectoryFilters["category"],
+  entry: SocialDirectoryEntry,
+) {
+  if (category === "all") return true;
+  if (category === "following") return entry.myFollow;
+  if (category === "followers") return entry.followsMe;
+  if (category === "mutuals") return entry.myFollow && entry.followsMe;
+  if (category === "not-following-back") return entry.myFollow && !entry.followsMe;
+  if (category === "fans") return !entry.myFollow && entry.followsMe;
+  if (category === "new") return entry.isNewFollower;
+  if (category === "lost") return entry.isLostFollower;
+  return entry.inNetwork && !entry.myFollow && !entry.followsMe;
 }
 
 function relationshipMatches(filter: "any" | "yes" | "no", value: boolean) {

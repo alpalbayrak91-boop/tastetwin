@@ -11,7 +11,7 @@ Son guncelleme: 24 Temmuz 2026
 - Aday kartinda profil resmi; detayinda ortak puanlar, film etkileri ve adaya baglayan hesaplar gorunuyor.
 - Uygulama tek kopya calisiyor. Ikinci kez acilinca mevcut pencere one geliyor.
 - Eklenti tek dugmeyle once takip/takipci listesini kaydediyor, sonra ikinci halka ag taramasina devam ediyor.
-- Ag taramasinda takip edilenler ve takipciler tohum olarak kullaniliyor; dogrudan iliski listesindeki hesaplar kesif adayi sayilmiyor.
+- Ag taramasinda yalniz takip edilenlerden gunluk rastgele bir ornek tohum olarak kullaniliyor; takipciler sosyal listede kalir fakat kesfi baslatmaz.
 - Eslesmeler sayfali; filtreler sayi girisiyle calisiyor ve varsayilan durumda tum adaylari gosteriyor.
 - Onerilen, zevk, nislik, baglanti kalitesi, aktiflik, ortak film ve gecerlilige gore siralama var.
 - RSS'deki son gorulen film etkinliginden 30/90 gunluk aktiflik ve son etkinlik zamani hesaplanir. Bu login zamani degildir.
@@ -75,8 +75,17 @@ Baglanti kalitesi, baglayici hesabin taranan following listesinin genisligine go
 
 ## Bilinen eksikler ve sonraki adimlar
 
-- Paylasim karti su an metin kopyalar; PNG indirme ve boyut secenekleri eklenmeli.
+- Paylasim karti 0.2.0 arayuzunden kaldirildi; sosyal kisi dizini urunun tek ana calisma alani.
 - Yerel nislik puani, yeterli film basina kullanici sayisi yoksa dusuk guvenli sayilmali.
 - 10.000 kisilik ag taramasi Letterboxd hiz sinirlarina baglidir; sosyal asama ve tamamlanan ag sonucu kayitlidir fakat kaldigi yerden devam henuz yoktur.
 - Binlerce kisinin RSS aktifligini tek seferde taramak uzun surebilir. Sosyal dizinde aktiflik verisi olmayanlar kaybolmaz; "taranmadi" olarak kalir.
 - Halka acilmadan once uzanti izin aciklamalari, gizlilik metni, TMDB atfi ve farkli Windows kullanicisi testi tamamlanmali.
+# 0.2.0 - Birlesik sosyal alan
+
+- Masaustu uygulamasindaki tek tus Letterboxd profilini acar ve 0.2.0 eklentisinden otomatik tam tarama ister.
+- Sosyal listeler ilk asamada kaydedilir; ikinci halka ag taramasi devam eder ve tamamlaninca ayri kayit olusur.
+- Ag kesfi yalniz kullanicinin takip ettiklerini baglayici olarak kullanir. Gunluk kararli rastgele siralama ve baglayici basina 220 hesap siniri, tek bir buyuk hesabin sonucu ele gecirmesini engeller.
+- Film paneli ve Sosyal disindaki ayri Zevk eslesmeleri/Paylasim karti menuleri kaldirildi. Zevk, aktiflik ve ortak baglanti verileri sosyal kisi dizinine tasindi.
+- Takip, takipci, karsilikli, geri takip etmeyen, takip edilmeyen, yeni, cikan ve ag kesfi sayilari tiklanabilir filtrelerdir; tum sonuclar sayfalanir.
+- RSS aktiflik taramasi eksik verisi olan butun dizini partiler halinde tarar ve her partiyi kalici olarak kaydeder.
+- TMDB token dogrulama, ilerleme, zenginlestirilen film sayisi, hata ve son calisma zamani arayuzde gorunur.

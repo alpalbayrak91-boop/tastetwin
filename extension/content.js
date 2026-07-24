@@ -1,10 +1,13 @@
 const MAX_NETWORK_NODES = 10000;
+const MAX_NETWORK_CONNECTORS = 120;
+const MAX_MEMBERS_PER_CONNECTOR = 220;
 const PAGE_DELAY_MS = 1400;
 const RETRY_DELAYS_MS = [5000, 12000, 25000];
+let activeScan;
 
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   if (message?.type !== "scanTasteTwin") return;
-  runScan(message.mode === "social" ? "social" : "full")
+  startScan(message.mode === "social" ? "social" : "full")
     .then((payload) => {
       notify({ state: "complete", payload });
       sendResponse({ ok: true, payload });
@@ -15,6 +18,30 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     });
   return true;
 });
+
+void claimAppRequestedScan();
+
+function startScan(mode) {
+  if (!activeScan) {
+    activeScan = runScan(mode).finally(() => {
+      activeScan = undefined;
+    });
+  }
+  return activeScan;
+}
+
+async function claimAppRequestedScan() {
+  const handle = currentHandle();
+  if (!handle) return;
+  try {
+    const result = await chrome.runtime.sendMessage({ type: "claimPendingScan", handle });
+    if (!result?.ok || !result.pending) return;
+    notify({ state: "starting", text: "TasteTwin uygulamasindan tarama emri alindi", current: 0 });
+    await startScan(result.mode === "social" ? "social" : "full");
+  } catch {
+    // The local app may be closed or this page may not be the requested profile.
+  }
+}
 
 async function runScan(mode) {
   const handle = currentHandle();
@@ -46,11 +73,15 @@ async function saveStage(payload, state, text) {
 
 async function scanTwoHopNetwork(owner, directFollowing, directFollowers) {
   const directMembers = uniqueMembers([...directFollowing, ...directFollowers]);
+  const followedMembers = uniqueMembers(directFollowing);
   const nodes = new Set([owner, ...directMembers.map((member) => member.username)]);
   const directHandles = new Set(nodes);
   const candidates = new Map();
   const daySeed = new Date().toISOString().slice(0, 10);
-  const connectors = seededShuffle(directMembers, `${owner}-${daySeed}`);
+  // Only people the owner deliberately follows can seed discovery. A daily
+  // stable shuffle spreads the scan over different circles without jumping
+  // into arbitrary followers' networks.
+  const connectors = seededShuffle(followedMembers, `${owner}-${daySeed}`).slice(0, MAX_NETWORK_CONNECTORS);
   let edges = directMembers.length;
   let capped = false;
   let failedConnectors = 0;
@@ -64,7 +95,7 @@ async function scanTwoHopNetwork(owner, directFollowing, directFollowers) {
     const member = connectors[index];
     notify({
       state: "network",
-      text: `Ag taraniyor: ${member.username}`,
+      text: `Takip ettigin kisiden ag taraniyor: ${member.username}`,
       current: index + 1,
       total: connectors.length,
       nodes: nodes.size,
@@ -72,14 +103,21 @@ async function scanTwoHopNetwork(owner, directFollowing, directFollowers) {
     const remaining = MAX_NETWORK_NODES - nodes.size;
     let theirs;
     try {
-      theirs = await scanList(member.username, "following", undefined, remaining);
+      theirs = await scanList(
+        member.username,
+        "following",
+        undefined,
+        Math.min(remaining, MAX_MEMBERS_PER_CONNECTOR),
+      );
     } catch {
       failedConnectors += 1;
       continue;
     }
     connectorsScanned += 1;
     edges += theirs.length;
-    const connectorWeight = Number((1 / Math.log2(Math.max(3, theirs.length + 2))).toFixed(3));
+    const connectorWeight = Number(
+      Math.max(0.04, 1 / Math.log2(Math.max(3, theirs.length + 2))).toFixed(3),
+    );
     for (const next of theirs) {
       nodes.add(next.username);
       if (directHandles.has(next.username)) continue;

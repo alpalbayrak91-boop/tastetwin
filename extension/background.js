@@ -11,9 +11,17 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     return true;
   }
 
+  if (message?.type === "claimPendingScan") {
+    claimPendingScan(message.handle)
+      .then((result) => sendResponse({ ok: true, ...result }))
+      .catch((error) => sendResponse({ ok: false, error: String(error.message ?? error) }));
+    return true;
+  }
+
   if (message?.type !== "saveBridge") return;
 
-  sendToTasteTwin(message.payload)
+  const bridgedPayload = { ...message.payload, scanStage: message.stage };
+  sendToTasteTwin(bridgedPayload)
     .then(async () => {
       const { scanHistory = [] } = await chrome.storage.local.get("scanHistory");
       const historyEntry = {
@@ -26,7 +34,7 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
         networkCandidates: message.payload.network?.candidateCount ?? message.payload.network?.candidates?.length ?? 0,
       };
       return chrome.storage.local.set({
-        lastScan: { ...message.payload, savedAt: message.payload.capturedAt ?? new Date().toISOString() },
+        lastScan: { ...bridgedPayload, savedAt: message.payload.capturedAt ?? new Date().toISOString() },
         scanHistory: [historyEntry, ...scanHistory].slice(0, 20),
       });
     })
@@ -63,6 +71,17 @@ async function beginScan(handle, mode) {
       updatedAt: new Date().toISOString(),
     },
   });
+}
+
+async function claimPendingScan(handle) {
+  const response = await fetch("http://127.0.0.1:5173/api/extension/claim-scan", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ handle }),
+  });
+  const body = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error(body.error ?? `TasteTwin scan claim failed: ${response.status}`);
+  return body;
 }
 
 async function sendToTasteTwin(payload) {

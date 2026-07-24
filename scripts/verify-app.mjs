@@ -154,44 +154,12 @@ await page.evaluate(async () => {
 });
 
 await page.reload({ waitUntil: "networkidle" });
+if ((await page.locator(".tabs button").count()) !== 2) throw new Error("The app should expose only Film and Social tabs");
+if ((await page.getByText("Paylasim karti", { exact: true }).count()) !== 0) throw new Error("Share card tab is still visible");
+if ((await page.getByText("Zevk eslesmeleri", { exact: true }).count()) !== 0) throw new Error("Separate taste-match tab is still visible");
 await page.locator(".tabs button").nth(1).click();
-await page.locator(".match-card").first().waitFor();
-if ((await page.locator(".scope-control").count()) !== 0) throw new Error("Redundant scope control still visible");
-if ((await page.locator('.filter-band input[type="number"]').count()) < 8) throw new Error("Numeric filters missing");
-if (!(await page.locator(".match-pagination").innerText()).includes("1 / 2")) throw new Error("Match pagination missing");
-await page.locator(".match-pagination button").last().click();
-if ((await page.locator(".match-card").count()) !== 5) throw new Error("Second match page has the wrong size");
-await page.locator(".match-pagination button").first().click();
-await page.screenshot({ path: screenshotPath.replace(/\.png$/i, "-matches.png"), fullPage: true });
-if (!(await page.locator(".match-card").first().innerText()).includes("3\nortak baglanti")) {
-  throw new Error("Mutual connection count missing from match card");
-}
-if (!(await page.locator(".match-card .activity-line").first().innerText()).includes("2 gun once")) {
-  throw new Error("Recent film activity missing from match card");
-}
-if (!(await page.locator(".match-card .profile-arrow").first().getAttribute("href"))?.includes("letterboxd.com/member")) {
-  throw new Error("Direct Letterboxd profile link missing from match card");
-}
-const coverage = await page.locator(".coverage-line").first().innerText();
-const score = Number(await page.locator(".radial-score strong").first().innerText());
-if (!coverage.includes("3 filme ikiniz de puan")) throw new Error(`Unexpected coverage text: ${coverage}`);
-if (score > 60) throw new Error(`Low-evidence score is still too high: ${score}`);
-await page.locator(".match-card").first().click();
-await page.locator(".match-dialog").waitFor();
-const commonRows = await page.locator(".match-dialog .rating-row:not(.rating-head)").count();
-if (commonRows !== 3) throw new Error(`Expected 3 rated common-film rows, found ${commonRows}`);
-if ((await page.locator(".match-card .profile-avatar").count()) === 0) throw new Error("Match avatar missing");
-if (!(await page.locator(".together-pick").first().innerText()).includes("Watchlist Only")) {
-  throw new Error("Watchlist recommendation missing");
-}
-if ((await page.locator(".connection-list a").count()) !== 3) throw new Error("Mutual connection list missing");
-if ((await page.locator(".connection-list img").count()) !== 3) throw new Error("Mutual connection avatars missing");
-if ((await page.locator(".negative-impact").count()) !== 1) throw new Error("Divergence penalty missing");
-await page.screenshot({ path: screenshotPath.replace(/\.png$/i, "-detail.png") });
-await page.locator(".match-dialog .dialog-actions button").click();
-
-await page.locator(".tabs button").nth(2).click();
 await page.locator(".social-directory").waitFor();
+await page.locator(".match-detail-button").first().waitFor();
 const directoryTitle = await page.locator(".social-directory-title").innerText();
 if (!directoryTitle.includes("2056")) throw new Error(`Social directory total missing: ${directoryTitle}`);
 if (!(await page.locator(".directory-pagination").innerText()).includes("1/21")) {
@@ -207,6 +175,17 @@ if (!(await page.locator(".directory-pagination").innerText()).includes("2/21"))
 if (!(await page.locator(".history-explainer").innerText()).includes("arasinda degismis olabilir")) {
   throw new Error("Follower-change time window missing");
 }
+const categoryButtons = page.locator(".social-category-grid button");
+if ((await categoryButtons.count()) !== 9) throw new Error("Social category buttons are incomplete");
+await categoryButtons.filter({ hasText: "Takipcilerin" }).click();
+if (!(await page.locator(".directory-summary").innerText()).includes("1100 kisi")) {
+  throw new Error("Clickable follower category does not include the full list");
+}
+await categoryButtons.filter({ hasText: "Yeni takipci" }).click();
+if (!(await page.locator(".directory-summary").innerText()).includes("1 kisi")) throw new Error("New follower category failed");
+await categoryButtons.filter({ hasText: "Takipten cikan" }).click();
+if (!(await page.locator(".directory-summary").innerText()).includes("1 kisi")) throw new Error("Lost follower category failed");
+await categoryButtons.filter({ hasText: "Tum sosyal veriler" }).click();
 await page.locator(".member-search input").first().fill("member1254");
 if (!(await page.locator(".social-directory").innerText()).includes("@member1254")) {
   throw new Error("Social member search failed");
@@ -215,10 +194,22 @@ if (!(await page.locator(".social-directory-list .profile-arrow").first().getAtt
   throw new Error("Social directory Letterboxd link missing");
 }
 await page.locator(".member-search input").first().fill("");
-await page.locator(".social-directory-filters label").filter({ hasText: "Beni takip ediyor" }).locator("select").selectOption("yes");
-if (!(await page.locator(".directory-summary").innerText()).includes("1100 kisi")) {
-  throw new Error("Follower relationship filter does not include the full list");
+await page.locator(".member-search input").first().fill("member0000");
+const score = Number(await page.locator(".directory-score strong").first().innerText());
+await page.locator(".match-detail-button").first().click();
+await page.locator(".match-dialog").waitFor();
+const commonRows = await page.locator(".match-dialog .rating-row:not(.rating-head)").count();
+const coverage = await page.locator(".coverage-line").first().innerText();
+if (commonRows !== 3 || !coverage.includes("3 ortak puanli film")) {
+  throw new Error(`Social taste detail is incomplete: ${JSON.stringify({ commonRows, coverage })}`);
 }
+if (!(await page.locator(".together-pick").first().innerText()).includes("Watchlist Only")) {
+  throw new Error("Watchlist recommendation missing");
+}
+if ((await page.locator(".connection-list a").count()) !== 3) throw new Error("Mutual connection list missing");
+if ((await page.locator(".negative-impact").count()) !== 1) throw new Error("Divergence penalty missing");
+await page.screenshot({ path: screenshotPath.replace(/\.png$/i, "-detail.png") });
+await page.locator(".match-dialog .dialog-actions button").click();
 
 await page.screenshot({ path: screenshotPath, fullPage: true });
 await page.setViewportSize({ width: 390, height: 844 });
@@ -229,5 +220,5 @@ const overlay = await page.locator("vite-error-overlay, .vite-error-overlay, #we
 if (overlay) throw new Error("Framework error overlay is visible");
 if (consoleErrors.length) throw new Error(`Console errors: ${consoleErrors.join(" | ")}`);
 
-console.log(JSON.stringify({ archiveAfterReload: 900, coverage, score, commonRows, socialTotal: 2056, followerFilter: 1100, mobileOverflow: overflow }));
+console.log(JSON.stringify({ archiveAfterReload: 900, tabs: 2, coverage, score, commonRows, socialTotal: 2056, followerCategory: 1100, mobileOverflow: overflow }));
 await browser.close();

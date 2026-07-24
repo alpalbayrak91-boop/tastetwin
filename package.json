@@ -1,7 +1,7 @@
 {
   "name": "tastetwin",
   "private": true,
-  "version": "0.1.9",
+  "version": "0.2.0",
   "productName": "TasteTwin",
   "description": "Local-first Letterboxd social graph and movie taste matching app.",
   "author": "TasteTwin",
@@ -12,7 +12,7 @@
     "package-extension": "node scripts/package-extension.mjs",
     "build": "npm run package-extension && tsc -b && vite build && node scripts/build-desktop-server.mjs",
     "desktop": "npm run build && electron-forge start",
-    "make": "npm run build && electron-forge make",
+    "make": "npm run build && powershell -NoProfile -ExecutionPolicy Bypass -File scripts/make-windows.ps1",
     "preview": "vite preview --host 127.0.0.1",
     "start": "node server.mjs"
   },
