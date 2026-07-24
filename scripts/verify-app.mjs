@@ -98,11 +98,18 @@ await page.evaluate(async () => {
       ...extras,
     ],
   };
-  const following = Array.from({ length: 135 }, (_, index) => ({
-    username: `member${String(index).padStart(3, "0")}`,
+  const following = Array.from({ length: 1255 }, (_, index) => ({
+    username: `member${String(index).padStart(4, "0")}`,
     displayName: `Member ${index}`,
   }));
-  const followers = following.slice(0, 110);
+  const followers = following.slice(0, 1100);
+  const networkCandidates = Array.from({ length: 800 }, (_, index) => ({
+    username: `network${String(index).padStart(4, "0")}`,
+    displayName: `Network ${index}`,
+    connections: 1 + (index % 12),
+    connectionWeight: 0.1 + (index % 10) / 10,
+    via: ["member0000"],
+  }));
   const social = {
     available: true,
     handle: owner.handle,
@@ -111,14 +118,16 @@ await page.evaluate(async () => {
     source: "browser-extension",
     complete: true,
     warning: "Verified extension scan",
-    counts: { following: 135, followers: 110, mutuals: 110, notFollowingBack: 25, fans: 0 },
+    counts: { following: 1255, followers: 1100, mutuals: 1100, notFollowingBack: 155, fans: 0 },
     following,
     followers,
     mutuals: followers,
-    notFollowingBack: following.slice(110),
+    notFollowingBack: following.slice(1100),
     fans: [],
     lostFollowers: [{ username: "lostmember", displayName: "Lost Member" }],
-    newFollowers: [{ username: "newmember", displayName: "New Member" }],
+    newFollowers: [{ username: "member0000", displayName: "Member 0" }],
+    network: { nodes: 2056, edges: 4000, capped: false, candidateCount: 800, connectorsScanned: 40 },
+    networkCandidates,
   };
   const nextState = {
     ...state,
@@ -127,8 +136,8 @@ await page.evaluate(async () => {
       ...Array.from({ length: 55 }, (_, index) => ({
         ...candidate,
         id: `rss-candidate-${index}`,
-        handle: `candidate${String(index).padStart(2, "0")}`,
-        displayName: `Candidate ${index}`,
+        handle: `member${String(index).padStart(4, "0")}`,
+        displayName: `Member ${index}`,
       })),
     ],
     activeId: owner.id,
@@ -160,6 +169,9 @@ if (!(await page.locator(".match-card").first().innerText()).includes("3\nortak 
 if (!(await page.locator(".match-card .activity-line").first().innerText()).includes("2 gun once")) {
   throw new Error("Recent film activity missing from match card");
 }
+if (!(await page.locator(".match-card .profile-arrow").first().getAttribute("href"))?.includes("letterboxd.com/member")) {
+  throw new Error("Direct Letterboxd profile link missing from match card");
+}
 const coverage = await page.locator(".coverage-line").first().innerText();
 const score = Number(await page.locator(".radial-score strong").first().innerText());
 if (!coverage.includes("3 filme ikiniz de puan")) throw new Error(`Unexpected coverage text: ${coverage}`);
@@ -179,16 +191,33 @@ await page.screenshot({ path: screenshotPath.replace(/\.png$/i, "-detail.png") }
 await page.locator(".match-dialog .dialog-actions button").click();
 
 await page.locator(".tabs button").nth(2).click();
-await page.locator(".social-list").first().waitFor();
-const firstSocialTitle = await page.locator(".social-list-title").first().innerText();
-if (!firstSocialTitle.includes("135")) throw new Error(`Social total missing: ${firstSocialTitle}`);
-if ((await page.locator(".load-more-button").count()) === 0) throw new Error("Social pagination control missing");
+await page.locator(".social-directory").waitFor();
+const directoryTitle = await page.locator(".social-directory-title").innerText();
+if (!directoryTitle.includes("2056")) throw new Error(`Social directory total missing: ${directoryTitle}`);
+if (!(await page.locator(".directory-pagination").innerText()).includes("1/21")) {
+  throw new Error("Social directory pagination missing");
+}
+if ((await page.locator(".social-directory-list li").count()) !== 100) {
+  throw new Error("Social directory page size is wrong");
+}
+await page.locator(".directory-pagination button").last().click();
+if (!(await page.locator(".directory-pagination").innerText()).includes("2/21")) {
+  throw new Error("Social directory next page failed");
+}
 if (!(await page.locator(".history-explainer").innerText()).includes("arasinda degismis olabilir")) {
   throw new Error("Follower-change time window missing");
 }
-await page.locator(".member-search input").first().fill("member134");
-if (!(await page.locator(".social-list").first().innerText()).includes("@member134")) {
+await page.locator(".member-search input").first().fill("member1254");
+if (!(await page.locator(".social-directory").innerText()).includes("@member1254")) {
   throw new Error("Social member search failed");
+}
+if (!(await page.locator(".social-directory-list .profile-arrow").first().getAttribute("href"))?.includes("letterboxd.com/member1254")) {
+  throw new Error("Social directory Letterboxd link missing");
+}
+await page.locator(".member-search input").first().fill("");
+await page.locator(".social-directory-filters label").filter({ hasText: "Beni takip ediyor" }).locator("select").selectOption("yes");
+if (!(await page.locator(".directory-summary").innerText()).includes("1100 kisi")) {
+  throw new Error("Follower relationship filter does not include the full list");
 }
 
 await page.screenshot({ path: screenshotPath, fullPage: true });
@@ -200,5 +229,5 @@ const overlay = await page.locator("vite-error-overlay, .vite-error-overlay, #we
 if (overlay) throw new Error("Framework error overlay is visible");
 if (consoleErrors.length) throw new Error(`Console errors: ${consoleErrors.join(" | ")}`);
 
-console.log(JSON.stringify({ archiveAfterReload: 900, coverage, score, commonRows, socialTotal: 135, mobileOverflow: overflow }));
+console.log(JSON.stringify({ archiveAfterReload: 900, coverage, score, commonRows, socialTotal: 2056, followerFilter: 1100, mobileOverflow: overflow }));
 await browser.close();

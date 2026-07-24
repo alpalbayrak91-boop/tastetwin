@@ -7,8 +7,10 @@ TasteTwin is a local-first Letterboxd social graph and movie taste matching app.
 - Imports a member's full Letterboxd export ZIP or CSV.
 - Reads following and follower lists through the companion Chrome extension.
 - Finds mutuals, non-followers, new followers, and lost followers.
+- Manages the complete direct and discovered social directory even when a person has no film data.
+- Filters and paginates people by both relationship directions, network source, and visible film activity.
 - Compares the imported archive with recent public RSS activity from other members.
-- Defaults matching to people outside your current following list.
+- Lets the user independently filter whether they follow a person and whether that person follows them.
 - Opens each match into a rated common-film and divergence breakdown.
 - Combines social and two-hop network scanning in one extension action while saving the social stage first.
 - Provides numeric filters, sorting, pagination, weighted mutual connections, and recent film-activity signals.
@@ -31,13 +33,15 @@ TasteTwin is a local-first Letterboxd social graph and movie taste matching app.
 3. Return to TasteTwin and use **People I do not follow** in Taste matches.
 4. Run the optional two-hop network scan to discover candidates outside your following list. Choose how many ranked candidates should have their RSS activity checked.
 
-Network candidates are ranked by how often they appear across the following lists that were scanned. RSS matching is processed in small batches and the result count is user-controlled, so the interface remains usable during large calculations.
+Network candidates are ranked by weighted shared connectors. Selective connectors count more than accounts following a very broad set of people, while daily connector shuffling gives successive scans some discovery diversity. RSS matching is processed in small batches and the result count is user-controlled.
 
 The displayed taste score uses only films rated by both people. Rating gaps of 0-1 are positive, 1.5 is neutral, and gaps of 2 or more become increasingly negative. Sentiment context matters: a 2/4 split is penalized more than 0.5/2.5, repeated splits add an extra penalty, and locally rare or divisive films can carry more weight. Sparse comparisons are pulled toward a neutral score of 50 and shown with a separate validity percentage.
 
 The current scoring model, social-data limits, TMDB recommendation plan, and known gaps are recorded in [docs/PRODUCT-NOTES.md](docs/PRODUCT-NOTES.md).
 
 Optional TMDB enrichment accepts the user's local API Read Access Token and adds recommendations, keywords, directors, countries, and posters to shared-love/watchlist matching. The TMDB token is stored only in local app storage.
+
+For a public or revenue-generating release, asking every user to enter a personal TMDB key does not by itself settle licensing. Review TMDB's current terms and attribution requirements before release.
 
 Windows may show an unknown publisher warning until the installer is code-signed.
 

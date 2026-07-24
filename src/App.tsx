@@ -1,5 +1,7 @@
 import {
   BarChart3,
+  ArrowLeft,
+  ArrowRight,
   Clapperboard,
   Copy,
   Download,
@@ -34,22 +36,21 @@ import {
   type MatchSort,
   type RelationshipFilter,
 } from "./lib/discovery";
+import {
+  buildSocialDirectory,
+  filterAndSortSocialDirectory,
+  paginateSocialDirectory,
+  type SocialDirectoryEntry,
+  type SocialDirectorySort,
+  type SocialMemberRecord,
+} from "./lib/social-directory";
 import { clearPersistentState, loadPersistentState, savePersistentState } from "./lib/storage";
 import { buildMatchesAsync, buildRecommendations, decadeTerms, getStats, topTerms } from "./lib/taste";
 import type { FilmSignal, Language, MatchResult, UserTaste } from "./types";
 
 type Tab = "overview" | "matches" | "social" | "profile";
 
-type SocialMember = {
-  id?: string;
-  username: string;
-  displayName: string;
-  avatarUrl?: string;
-  connections?: number;
-  connectionWeight?: number;
-  via?: string[];
-  viaDetails?: UserTaste["connectionDetails"];
-};
+type SocialMember = SocialMemberRecord;
 
 type SocialData =
   | {
@@ -88,6 +89,7 @@ type SocialData =
         candidateCount?: number;
         completedAt?: string;
       };
+      networkCandidates?: SocialMember[];
     };
 
 type PersistentAppState = {
@@ -166,6 +168,19 @@ export default function App() {
     }
     return avatars;
   }, [currentSocial]);
+  const socialAccountCount = useMemo(
+    () =>
+      currentSocial?.available
+        ? buildSocialDirectory({
+            following: currentSocial.following,
+            followers: currentSocial.followers,
+            newFollowers: currentSocial.newFollowers,
+            lostFollowers: currentSocial.lostFollowers,
+            networkCandidates: currentSocial.networkCandidates,
+          }, users).length
+        : 0,
+    [currentSocial, users],
+  );
   const matchCandidates = useMemo(
     () => (activeUser ? users.filter((user) => user.id !== activeUser.id) : []),
     [activeUser, users],
@@ -443,6 +458,10 @@ export default function App() {
     await fetchProfilesForHandles(followingHandles, social.following);
   }
 
+  async function loadSocialActivity(handles: string[], members: SocialMember[]) {
+    await fetchProfilesForHandles(handles, members, "social");
+  }
+
   async function useNetworkAsMatchCandidates() {
     const handle = accountHandle || activeUser?.handle || "";
     if (!handle) return;
@@ -484,7 +503,11 @@ export default function App() {
     }
   }
 
-  async function fetchProfilesForHandles(cleanHandles: string[], members: SocialMember[] = []) {
+  async function fetchProfilesForHandles(
+    cleanHandles: string[],
+    members: SocialMember[] = [],
+    targetTab: Tab = "matches",
+  ) {
     setLoading(true);
     setStatus("");
     try {
@@ -521,13 +544,18 @@ export default function App() {
         failed += payload.errors?.length ?? 0;
       }
       const currentUpload = users.find((user) => user.source === "upload");
-      const nextUsers = [
-        ...users.filter((user) => user.source !== "rss"),
-        ...fetched.filter((user) => user.id !== currentUpload?.id).map(deriveUserActivity),
-      ];
+      const rssByHandle = new Map(
+        users
+          .filter((user) => user.source === "rss")
+          .map((user) => [user.handle.toLowerCase(), user]),
+      );
+      for (const user of fetched) {
+        if (user.id !== currentUpload?.id) rssByHandle.set(user.handle.toLowerCase(), deriveUserActivity(user));
+      }
+      const nextUsers = [...users.filter((user) => user.source !== "rss"), ...rssByHandle.values()];
       setUsers(nextUsers);
       setActiveId(currentUpload?.id ?? fetched[0]?.id ?? "");
-      setTab(currentUpload ? "matches" : "overview");
+      setTab(currentUpload ? targetTab : "overview");
       setStatus(
         language === "tr"
           ? `${handles.length} adayin tamami denendi; ${fetched.length} kisinin film aktivitesi alindi${failed ? `, ${failed} hesap alinamadi` : ""}.`
@@ -795,6 +823,27 @@ export default function App() {
           <a href="https://www.themoviedb.org/settings/api" target="_blank" rel="noreferrer">
             {language === "tr" ? "TMDB token alma sayfasi" : "Get a TMDB token"}
           </a>
+          <details className="tmdb-form-guide">
+            <summary>{language === "tr" ? "TMDB formuna ne yazacagim?" : "What should I enter in the TMDB form?"}</summary>
+            <p>
+              {language === "tr"
+                ? "Su anki gelir getirmeyen kendi testin icin Personal use = Yes sec. Uygulama adi TasteTwin, tur Desktop Application (yoksa Other), URL asagidaki GitHub adresi olabilir. Adres alanlarina gercek kendi bilgilerini yaz."
+                : "For your current non-revenue personal test choose Personal use = Yes. Use TasteTwin as the app name, Desktop Application (or Other) as the type, and the GitHub URL below. Enter your own real address details."}
+            </p>
+            <a href="https://github.com/alpalbayrak91-boop/tastetwin" target="_blank" rel="noreferrer">
+              https://github.com/alpalbayrak91-boop/tastetwin
+            </a>
+            <code>
+              {language === "tr"
+                ? "TasteTwin, kullanicinin kendi Letterboxd export ve sosyal tarama verilerini yerel olarak analiz eden, film zevki eslestirmesi ve kisisel watchlist onerileri sunan gelir getirmeyen bir masaustu uygulamasidir."
+                : "TasteTwin is a non-revenue desktop application that locally analyzes the user's own Letterboxd export and social scan data for taste matching and personal watchlist recommendations."}
+            </code>
+            <small>
+              {language === "tr"
+                ? "Halka acik veya gelir getiren surumde herkesin kendi anahtarini girmesi tek basina ticari lisans sorununu otomatik cozmez; yayinlamadan once TMDB kosullari yeniden kontrol edilmelidir."
+                : "For a public or revenue-generating release, having every user enter a key does not automatically resolve licensing; review TMDB terms before publishing."}
+            </small>
+          </details>
           <small>This product uses the TMDB API but is not endorsed or certified by TMDB.</small>
         </details>
 
@@ -997,6 +1046,13 @@ export default function App() {
                       ? `${matchCandidates.length} aday hesaplandi; ${filteredMatches.length} filtreye uyuyor. ${matchPagination.start + (filteredMatches.length ? 1 : 0)}-${matchPagination.end} arasi gosteriliyor.`
                       : `${matchCandidates.length} candidates calculated; ${filteredMatches.length} match the filters. Showing ${matchPagination.start + (filteredMatches.length ? 1 : 0)}-${matchPagination.end}.`)}
                 </p>
+                {socialAccountCount > matchCandidates.length && (
+                  <p className="match-data-note">
+                    {language === "tr"
+                      ? `${socialAccountCount} sosyal hesap kayitli; eslesme puani yalniz film/RSS verisi alinmis ${matchCandidates.length} kisi icin hesaplanabilir. Diger hesaplar Sosyal ag ekraninda eksiksiz yonetilir.`
+                      : `${socialAccountCount} social accounts are stored; taste matching can score only the ${matchCandidates.length} people with film/RSS data. Everyone remains manageable in Social graph.`}
+                  </p>
+                )}
                 <div className="match-list">
                   {matchPagination.items.map((match) => (
                     <MatchCard
@@ -1036,6 +1092,8 @@ export default function App() {
                 onFetch={() => fetchSocialData("extension")}
                 onUseFollowing={useFollowingAsMatchCandidates}
                 onUseNetwork={useNetworkAsMatchCandidates}
+                users={users}
+                onLoadActivity={loadSocialActivity}
                 networkCandidateLimit={networkCandidateLimit}
                 onNetworkCandidateLimitChange={setNetworkCandidateLimit}
                 onResetHistory={resetFollowerHistory}
@@ -1131,6 +1189,8 @@ function SocialPanel({
   onFetch,
   onUseFollowing,
   onUseNetwork,
+  users,
+  onLoadActivity,
   networkCandidateLimit,
   onNetworkCandidateLimitChange,
   onResetHistory,
@@ -1141,6 +1201,8 @@ function SocialPanel({
   onFetch: () => void;
   onUseFollowing: () => void;
   onUseNetwork: () => void;
+  users: UserTaste[];
+  onLoadActivity: (handles: string[], members: SocialMember[]) => void;
   networkCandidateLimit: number;
   onNetworkCandidateLimitChange: (value: number) => void;
   onResetHistory: () => void;
@@ -1186,13 +1248,13 @@ function SocialPanel({
       : `May have changed between ${new Date(data.previousCheckedAt).toLocaleString("en-US")} and ${new Date(data.checkedAt).toLocaleString("en-US")}. The exact moment is unknown.`
     : undefined;
   const groups = [
-    { label: language === "tr" ? "Takip ettikleri" : "Following", value: data.counts.following, members: data.following },
-    { label: language === "tr" ? "Takipciler" : "Followers", value: data.counts.followers, members: data.followers },
-    { label: language === "tr" ? "Karsilikli" : "Mutuals", value: data.counts.mutuals, members: data.mutuals },
-    { label: language === "tr" ? "Seni takip etmeyenler" : "Not following back", value: data.counts.notFollowingBack, members: data.notFollowingBack },
-    { label: language === "tr" ? "Senin takip etmediklerin" : "Fans", value: data.counts.fans, members: data.fans },
-    { label: language === "tr" ? "Takipten cikanlar" : "Lost followers", value: data.lostFollowers.length, members: data.lostFollowers, note: changeWindow },
-    { label: language === "tr" ? "Yeni takipciler" : "New followers", value: data.newFollowers.length, members: data.newFollowers, note: changeWindow },
+    { label: language === "tr" ? "Takip ettikleri" : "Following", value: data.counts.following },
+    { label: language === "tr" ? "Takipciler" : "Followers", value: data.counts.followers },
+    { label: language === "tr" ? "Karsilikli" : "Mutuals", value: data.counts.mutuals },
+    { label: language === "tr" ? "Seni takip etmeyenler" : "Not following back", value: data.counts.notFollowingBack },
+    { label: language === "tr" ? "Senin takip etmediklerin" : "Fans", value: data.counts.fans },
+    { label: language === "tr" ? "Takipten cikanlar" : "Lost followers", value: data.lostFollowers.length },
+    { label: language === "tr" ? "Yeni takipciler" : "New followers", value: data.newFollowers.length },
   ];
 
   return (
@@ -1297,87 +1359,267 @@ function SocialPanel({
             : "Lost followers appear from the second scan onward; this first scan is saved as the baseline."}
         </p>
       )}
-      {groups.map(({ label, members, note }) => (
-        <SocialMemberSection key={label} label={label} members={members} language={language} note={note} />
-      ))}
+      <SocialDirectory
+        language={language}
+        data={data}
+        users={users}
+        loading={loading}
+        onLoadActivity={onLoadActivity}
+      />
     </section>
   );
 }
 
-function SocialMemberSection({
-  label,
-  members,
+function SocialDirectory({
   language,
-  note,
+  data,
+  users,
+  loading,
+  onLoadActivity,
 }: {
-  label: string;
-  members: SocialMember[];
   language: Language;
-  note?: string;
+  data: AvailableSocialData;
+  users: UserTaste[];
+  loading: boolean;
+  onLoadActivity: (handles: string[], members: SocialMember[]) => void;
 }) {
   const [query, setQuery] = useState("");
-  const [visibleCount, setVisibleCount] = useState(100);
-  const normalizedQuery = query.trim().toLowerCase();
-  const filtered = normalizedQuery
-    ? members.filter(
-        (member) =>
-          member.username.toLowerCase().includes(normalizedQuery) ||
-          member.displayName.toLowerCase().includes(normalizedQuery),
-      )
-    : members;
-  const visible = filtered.slice(0, visibleCount);
+  const [myFollow, setMyFollow] = useState<RelationshipFilter>("any");
+  const [followsMe, setFollowsMe] = useState<RelationshipFilter>("any");
+  const [source, setSource] = useState<"all" | "direct" | "network">("all");
+  const [activity, setActivity] = useState<"any" | "known" | "unknown">("any");
+  const [sort, setSort] = useState<SocialDirectorySort>("relationship");
+  const [pageSize, setPageSize] = useState(100);
+  const [page, setPage] = useState(1);
+  const directory = useMemo(
+    () => buildSocialDirectory({
+      following: data.following,
+      followers: data.followers,
+      newFollowers: data.newFollowers,
+      lostFollowers: data.lostFollowers,
+      networkCandidates: data.networkCandidates,
+    }, users),
+    [data, users],
+  );
+  const filtered = useMemo(
+    () => filterAndSortSocialDirectory(directory, { query, myFollow, followsMe, source, activity, sort }),
+    [activity, directory, followsMe, myFollow, query, sort, source],
+  );
+  const pagination = useMemo(
+    () => paginateSocialDirectory(filtered, page, pageSize),
+    [filtered, page, pageSize],
+  );
+
+  useEffect(() => {
+    setPage(1);
+  }, [activity, followsMe, myFollow, pageSize, query, sort, source]);
+
+  const activityKnown = filtered.filter((entry) => entry.activity?.lastActivityAt).length;
+  const filteredMembers = filtered.map(directoryEntryToMember);
 
   return (
-    <div className="panel social-list">
-      <div className="panel-title social-list-title">
+    <div className="panel social-directory">
+      <div className="panel-title social-directory-title">
         <UserCheck size={18} />
-        <h2>{label}</h2>
-        <strong>{members.length}</strong>
+        <div>
+          <h2>{language === "tr" ? "Baglantilarini yonet" : "Manage your connections"}</h2>
+          <p>
+            {language === "tr"
+              ? `${directory.length} tekil hesap; film verisi olmayanlar da dahildir.`
+              : `${directory.length} unique accounts, including people without film data.`}
+          </p>
+        </div>
+        <strong>{filtered.length}</strong>
       </div>
-      {note && <p className="muted-line history-window">{note}</p>}
-      {members.length > 12 && (
+      <div className="social-directory-filters">
         <label className="member-search">
           <Search size={16} />
           <input
             value={query}
             placeholder={language === "tr" ? "Kullanici ara" : "Search people"}
-            onChange={(event) => {
-              setQuery(event.target.value);
-              setVisibleCount(100);
-            }}
+            onChange={(event) => setQuery(event.target.value)}
           />
         </label>
-      )}
-      <MemberList members={visible} />
-      {visible.length < filtered.length && (
-        <button className="load-more-button" onClick={() => setVisibleCount((count) => count + 100)}>
-          <Users size={16} />
+        <DirectorySelect
+          label={language === "tr" ? "Ben takip ediyorum" : "I follow"}
+          value={myFollow}
+          onChange={(value) => setMyFollow(value as RelationshipFilter)}
+          options={relationshipOptions(language)}
+        />
+        <DirectorySelect
+          label={language === "tr" ? "Beni takip ediyor" : "Follows me"}
+          value={followsMe}
+          onChange={(value) => setFollowsMe(value as RelationshipFilter)}
+          options={relationshipOptions(language)}
+        />
+        <DirectorySelect
+          label={language === "tr" ? "Kaynak" : "Source"}
+          value={source}
+          onChange={(value) => setSource(value as typeof source)}
+          options={[
+            ["all", language === "tr" ? "Tumu" : "All"],
+            ["direct", language === "tr" ? "Baglantilarim" : "My connections"],
+            ["network", language === "tr" ? "Ag kesfi" : "Network discovery"],
+          ]}
+        />
+        <DirectorySelect
+          label={language === "tr" ? "Aktiflik verisi" : "Activity data"}
+          value={activity}
+          onChange={(value) => setActivity(value as typeof activity)}
+          options={[
+            ["any", language === "tr" ? "Fark etmez" : "Any"],
+            ["known", language === "tr" ? "Taranmis" : "Scanned"],
+            ["unknown", language === "tr" ? "Taranmamis" : "Not scanned"],
+          ]}
+        />
+        <DirectorySelect
+          label={language === "tr" ? "Sirala" : "Sort"}
+          value={sort}
+          onChange={(value) => setSort(value as SocialDirectorySort)}
+          options={[
+            ["relationship", language === "tr" ? "Iliski onceligi" : "Relationship"],
+            ["active", language === "tr" ? "En aktif" : "Most active"],
+            ["inactive", language === "tr" ? "En uzun suredir pasif" : "Least active"],
+            ["connections", language === "tr" ? "Ortak baglanti" : "Mutual links"],
+            ["name", language === "tr" ? "Isim" : "Name"],
+          ]}
+        />
+        <DirectorySelect
+          label={language === "tr" ? "Sayfa boyutu" : "Page size"}
+          value={String(pageSize)}
+          onChange={(value) => setPageSize(Number(value))}
+          options={[50, 100, 250].map((size) => [String(size), String(size)])}
+        />
+      </div>
+      <div className="directory-summary">
+        <span>
+          {language === "tr"
+            ? `${filtered.length} kisi filtreye uyuyor; ${activityKnown} kisinin aktifligi taranmis.`
+            : `${filtered.length} people match; ${activityKnown} have activity data.`}
+        </span>
+        <button
+          className="browser-scan-button"
+          disabled={loading || !filtered.length}
+          onClick={() => onLoadActivity(filtered.map((entry) => entry.username), filteredMembers)}
+        >
+          {loading ? <Loader2 className="spin" size={16} /> : <RefreshCcw size={16} />}
           <span>
             {language === "tr"
-              ? `${visible.length} / ${filtered.length} gosteriliyor - daha fazla`
-              : `${visible.length} / ${filtered.length} shown - load more`}
+              ? `Filtrelenen ${filtered.length} kisinin aktifligini tara`
+              : `Scan activity for ${filtered.length} filtered people`}
           </span>
         </button>
+      </div>
+      <SocialDirectoryList entries={pagination.items} language={language} />
+      {filtered.length > 0 && (
+        <nav className="match-pagination directory-pagination">
+          <button disabled={pagination.page <= 1} onClick={() => setPage((current) => Math.max(1, current - 1))}>
+            <ArrowLeft size={16} />
+            {language === "tr" ? "Onceki" : "Previous"}
+          </button>
+          <span>
+            {pagination.start + 1}-{pagination.end} / {filtered.length} · {language === "tr" ? "Sayfa" : "Page"}{" "}
+            {pagination.page}/{pagination.totalPages}
+          </span>
+          <button
+            disabled={pagination.page >= pagination.totalPages}
+            onClick={() => setPage((current) => Math.min(pagination.totalPages, current + 1))}
+          >
+            {language === "tr" ? "Sonraki" : "Next"}
+            <ArrowRight size={16} />
+          </button>
+        </nav>
       )}
     </div>
   );
 }
 
-function MemberList({ members }: { members: SocialMember[] }) {
-  if (!members.length) return <p className="muted-line">0</p>;
+function SocialDirectoryList({
+  entries,
+  language,
+}: {
+  entries: SocialDirectoryEntry[];
+  language: Language;
+}) {
+  if (!entries.length) return <p className="empty-state">0</p>;
   return (
-    <ul className="member-list">
-      {members.map((member) => (
-        <li key={member.username}>
-          {member.avatarUrl ? <img src={member.avatarUrl} alt="" /> : <span>{member.displayName.slice(0, 1)}</span>}
-          <a href={`https://letterboxd.com/${member.username}/`} target="_blank" rel="noreferrer">
-            <strong>{member.displayName}</strong>
-            <small>@{member.username}</small>
+    <ul className="social-directory-list">
+      {entries.map((entry) => (
+        <li key={entry.username}>
+          <Avatar name={entry.displayName} src={entry.avatarUrl} />
+          <div className="directory-person">
+            <strong>{entry.displayName}</strong>
+            <small>@{entry.username}</small>
+            <span>{entry.activity ? formatActivity(entry.activity, language) : language === "tr" ? "Aktiflik henuz taranmadi" : "Activity not scanned yet"}</span>
+          </div>
+          <div className="relationship-badges">
+            {entry.myFollow && <span className="relation-following">{language === "tr" ? "Takip ediyorum" : "Following"}</span>}
+            {entry.followsMe && <span className="relation-follower">{language === "tr" ? "Beni takip ediyor" : "Follows me"}</span>}
+            {entry.inNetwork && !entry.myFollow && !entry.followsMe && <span className="relation-network">{language === "tr" ? "Ag kesfi" : "Network"}</span>}
+            {entry.isNewFollower && <span className="relation-new">{language === "tr" ? "Yeni" : "New"}</span>}
+            {entry.isLostFollower && <span className="relation-lost">{language === "tr" ? "Cikmis" : "Lost"}</span>}
+          </div>
+          <div className="directory-score">
+            {entry.activity?.activityScore !== undefined && <strong>{entry.activity.activityScore}</strong>}
+            {(entry.connections ?? 0) > 0 && <small>{entry.connections} {language === "tr" ? "ortak" : "links"}</small>}
+          </div>
+          <a
+            className="profile-arrow"
+            href={`https://letterboxd.com/${entry.username}/`}
+            target="_blank"
+            rel="noreferrer"
+            title={language === "tr" ? "Letterboxd profilini ac" : "Open Letterboxd profile"}
+            aria-label={language === "tr" ? `${entry.displayName} Letterboxd profilini ac` : `Open ${entry.displayName} on Letterboxd`}
+          >
+            <ExternalLink size={18} />
           </a>
         </li>
       ))}
     </ul>
   );
+}
+
+function DirectorySelect({
+  label,
+  value,
+  options,
+  onChange,
+}: {
+  label: string;
+  value: string;
+  options: Array<readonly [string, string]>;
+  onChange: (value: string) => void;
+}) {
+  return (
+    <label>
+      {label}
+      <select value={value} onChange={(event) => onChange(event.target.value)}>
+        {options.map(([optionValue, optionLabel]) => (
+          <option value={optionValue} key={optionValue}>{optionLabel}</option>
+        ))}
+      </select>
+    </label>
+  );
+}
+
+function relationshipOptions(language: Language): Array<readonly [string, string]> {
+  return [
+    ["any", language === "tr" ? "Fark etmez" : "Any"],
+    ["yes", language === "tr" ? "Evet" : "Yes"],
+    ["no", language === "tr" ? "Hayir" : "No"],
+  ];
+}
+
+function directoryEntryToMember(entry: SocialDirectoryEntry): SocialMember {
+  return {
+    username: entry.username,
+    displayName: entry.displayName,
+    avatarUrl: entry.avatarUrl,
+    connections: entry.connections,
+    connectionWeight: entry.connectionWeight,
+    via: entry.via,
+    viaDetails: entry.viaDetails,
+  };
 }
 
 function PosterPanel({ language, films }: { language: Language; films: FilmSignal[] }) {
@@ -1536,9 +1778,22 @@ function MatchCard({
             </small>
           </div>
         </div>
-        <div className="radial-score" style={{ "--score": `${match.recommendationScore}%` } as React.CSSProperties}>
-          <strong>{match.recommendationScore}</strong>
-          <small>{language === "tr" ? "oneri" : "rec."}</small>
+        <div className="match-head-actions">
+          <a
+            className="profile-arrow"
+            href={`https://letterboxd.com/${match.user.handle}/`}
+            target="_blank"
+            rel="noreferrer"
+            title={language === "tr" ? "Letterboxd profilini ac" : "Open Letterboxd profile"}
+            aria-label={language === "tr" ? `${match.user.displayName} Letterboxd profilini ac` : `Open ${match.user.displayName} on Letterboxd`}
+            onClick={(event) => event.stopPropagation()}
+          >
+            <ExternalLink size={18} />
+          </a>
+          <div className="radial-score" style={{ "--score": `${match.recommendationScore}%` } as React.CSSProperties}>
+            <strong>{match.recommendationScore}</strong>
+            <small>{language === "tr" ? "oneri" : "rec."}</small>
+          </div>
         </div>
       </div>
 

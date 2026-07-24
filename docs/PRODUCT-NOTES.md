@@ -15,6 +15,9 @@ Son guncelleme: 24 Temmuz 2026
 - Eslesmeler sayfali; filtreler sayi girisiyle calisiyor ve varsayilan durumda tum adaylari gosteriyor.
 - Onerilen, zevk, nislik, baglanti kalitesi, aktiflik, ortak film ve gecerlilige gore siralama var.
 - RSS'deki son gorulen film etkinliginden 30/90 gunluk aktiflik ve son etkinlik zamani hesaplanir. Bu login zamani degildir.
+- Sosyal ag ekrani tek bir baglanti yonetim dizinidir. Takip edilen, takipci, karsilikli, hayran, takipten cikan ve ikinci halka kesif hesaplari film verisi olmasa da eksiksiz listelenir.
+- Sosyal dizin arama, iki bagimsiz takip filtresi, kaynak ve aktiflik filtresi, aktif/pasif/baglanti/isim siralamasi ve 50/100/250 kisilik gercek sayfalama sunar.
+- Eslesme ve sosyal kisi kartlarinda gercek Letterboxd profiline dogrudan gecis vardir.
 
 ## Puanlama v2
 
@@ -57,6 +60,8 @@ Bu is icin yapay zeka zorunlu degildir. AI sonucun aciklamasini yazabilir; asil 
 
 TMDB gelistirici API'si ticari olmayan kullanimda atifla ucretsizdir. Uygulamaya TMDB logosu ve zorunlu atif metni eklenmelidir. Kullanici kendi TMDB API Read Access Token'ini yerel ayarlara girecektir.
 
+Mevcut gelir getirmeyen kisisel test icin basvuruda Personal use secilebilir. Halka acik veya gelir getiren bir surumde herkesin kendi kisisel anahtarini girmesi, uygulamanin lisans durumunu kendiliginden cozmez; yayin oncesinde TMDB kosullari ve gerekirse TMDB onayi yeniden kontrol edilmelidir.
+
 - https://developer.themoviedb.org/docs/getting-started
 - https://developer.themoviedb.org/docs/faq
 - https://developer.themoviedb.org/reference/movie-recommendations
@@ -73,4 +78,5 @@ Baglanti kalitesi, baglayici hesabin taranan following listesinin genisligine go
 - Paylasim karti su an metin kopyalar; PNG indirme ve boyut secenekleri eklenmeli.
 - Yerel nislik puani, yeterli film basina kullanici sayisi yoksa dusuk guvenli sayilmali.
 - 10.000 kisilik ag taramasi Letterboxd hiz sinirlarina baglidir; sosyal asama ve tamamlanan ag sonucu kayitlidir fakat kaldigi yerden devam henuz yoktur.
+- Binlerce kisinin RSS aktifligini tek seferde taramak uzun surebilir. Sosyal dizinde aktiflik verisi olmayanlar kaybolmaz; "taranmadi" olarak kalir.
 - Halka acilmadan once uzanti izin aciklamalari, gizlilik metni, TMDB atfi ve farkli Windows kullanicisi testi tamamlanmali.

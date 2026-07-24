@@ -107,7 +107,10 @@ async function scanTwoHopNetwork(owner, directFollowing, directFollowers) {
   }
 
   const rankedCandidates = [...candidates.values()].sort(
-    (a, b) => b.connections - a.connections || a.username.localeCompare(b.username),
+    (a, b) =>
+      b.connectionWeight - a.connectionWeight ||
+      b.connections - a.connections ||
+      stableHash(`${daySeed}-${a.username}`) - stableHash(`${daySeed}-${b.username}`),
   );
   return {
     nodes: nodes.size,
