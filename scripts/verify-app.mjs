@@ -95,6 +95,7 @@ await page.evaluate(async () => {
     available: true,
     handle: owner.handle,
     checkedAt: new Date().toISOString(),
+    previousCheckedAt: new Date(Date.now() - 60 * 60 * 1000).toISOString(),
     source: "browser-extension",
     complete: true,
     warning: "Verified extension scan",
@@ -104,8 +105,8 @@ await page.evaluate(async () => {
     mutuals: followers,
     notFollowingBack: following.slice(110),
     fans: [],
-    lostFollowers: [],
-    newFollowers: [],
+    lostFollowers: [{ username: "lostmember", displayName: "Lost Member" }],
+    newFollowers: [{ username: "newmember", displayName: "New Member" }],
   };
   const nextState = {
     ...state,
@@ -126,6 +127,9 @@ await page.evaluate(async () => {
 await page.reload({ waitUntil: "networkidle" });
 await page.locator(".tabs button").nth(1).click();
 await page.locator(".match-card").first().waitFor();
+if (!(await page.locator(".match-card").first().innerText()).includes("3\nortak baglanti")) {
+  throw new Error("Mutual connection count missing from match card");
+}
 const coverage = await page.locator(".coverage-line").first().innerText();
 const score = Number(await page.locator(".radial-score strong").first().innerText());
 if (!coverage.includes("3 filme ikiniz de puan")) throw new Error(`Unexpected coverage text: ${coverage}`);
@@ -148,6 +152,9 @@ await page.locator(".social-list").first().waitFor();
 const firstSocialTitle = await page.locator(".social-list-title").first().innerText();
 if (!firstSocialTitle.includes("135")) throw new Error(`Social total missing: ${firstSocialTitle}`);
 if ((await page.locator(".load-more-button").count()) === 0) throw new Error("Social pagination control missing");
+if (!(await page.locator(".history-explainer").innerText()).includes("arasinda degismis olabilir")) {
+  throw new Error("Follower-change time window missing");
+}
 await page.locator(".member-search input").first().fill("member134");
 if (!(await page.locator(".social-list").first().innerText()).includes("@member134")) {
   throw new Error("Social member search failed");

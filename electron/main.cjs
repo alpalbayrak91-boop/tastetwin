@@ -4,6 +4,12 @@ const path = require("node:path");
 const { pathToFileURL } = require("node:url");
 
 const APP_URL = "http://127.0.0.1:5173/";
+const gotSingleInstanceLock = app.requestSingleInstanceLock();
+let mainWindow;
+
+if (!gotSingleInstanceLock) {
+  app.quit();
+}
 
 async function startLocalApp() {
   process.env.PORT = "5173";
@@ -36,9 +42,20 @@ function createWindow() {
     return { action: "deny" };
   });
   void window.loadURL(APP_URL);
+  mainWindow = window;
+  window.on("closed", () => {
+    if (mainWindow === window) mainWindow = undefined;
+  });
 }
 
-app.whenReady()
+app.on("second-instance", () => {
+  if (!mainWindow) return;
+  if (mainWindow.isMinimized()) mainWindow.restore();
+  mainWindow.show();
+  mainWindow.focus();
+});
+
+if (gotSingleInstanceLock) app.whenReady()
   .then(async () => {
     await startLocalApp();
     createWindow();
@@ -49,7 +66,16 @@ app.whenReady()
   .catch((error) => {
     const message = error instanceof Error ? `${error.message}\n\n${error.stack ?? ""}` : String(error);
     appendFileSync(path.join(app.getPath("userData"), "startup-error.log"), `${new Date().toISOString()}\n${message}\n\n`);
-    dialog.showErrorBox("TasteTwin baslatilamadi", message);
+    if (error?.code === "EADDRINUSE" || message.includes("EADDRINUSE")) {
+      dialog.showMessageBoxSync({
+        type: "info",
+        title: "TasteTwin zaten acik",
+        message: "TasteTwin zaten calisiyor.",
+        detail: "Kurulum dosyasini yeniden acmana gerek yok. Acik TasteTwin penceresini kullanabilirsin.",
+      });
+    } else {
+      dialog.showErrorBox("TasteTwin baslatilamadi", message);
+    }
     app.quit();
   });
 

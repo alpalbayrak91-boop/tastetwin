@@ -33,7 +33,7 @@ const PUBLIC_SOCIAL_PAGE_LIMIT = 8;
 
 await restoreBridgeCache();
 
-createServer(async (req, res) => {
+const server = createServer(async (req, res) => {
   try {
     const url = new URL(req.url ?? "/", `http://${req.headers.host ?? "127.0.0.1"}`);
 
@@ -173,8 +173,21 @@ createServer(async (req, res) => {
     console.error(error);
     sendJson(res, 500, { error: error instanceof Error ? error.message : "server_error" });
   }
-}).listen(port, "127.0.0.1", () => {
-  console.log(`TasteTwin live server: http://127.0.0.1:${port}/`);
+});
+
+await new Promise((resolve, reject) => {
+  const onError = (error) => {
+    server.off("listening", onListening);
+    reject(error);
+  };
+  const onListening = () => {
+    server.off("error", onError);
+    console.log(`TasteTwin live server: http://127.0.0.1:${port}/`);
+    resolve();
+  };
+  server.once("error", onError);
+  server.once("listening", onListening);
+  server.listen(port, "127.0.0.1");
 });
 
 async function fetchLetterboxdUser(rawHandle) {

@@ -32,6 +32,7 @@ import type { FilmSignal, Language, MatchResult, UserTaste } from "./types";
 
 type Tab = "overview" | "matches" | "social" | "profile";
 type MatchScope = "discover" | "following" | "all";
+type RelationshipFilter = "any" | "yes" | "no";
 
 type SocialMember = {
   id?: string;
@@ -97,6 +98,8 @@ export default function App() {
   const [matchLimit, setMatchLimit] = useState(50);
   const [networkCandidateLimit, setNetworkCandidateLimit] = useState(250);
   const [matchScope, setMatchScope] = useState<MatchScope>("discover");
+  const [myFollowFilter, setMyFollowFilter] = useState<RelationshipFilter>("any");
+  const [followsMeFilter, setFollowsMeFilter] = useState<RelationshipFilter>("any");
   const [matches, setMatches] = useState<MatchResult[]>([]);
   const [matchProgress, setMatchProgress] = useState("");
   const [selectedMatch, setSelectedMatch] = useState<MatchResult>();
@@ -118,6 +121,15 @@ export default function App() {
       new Set(
         currentSocial?.available
           ? currentSocial.following.map((member) => member.username.toLowerCase())
+          : [],
+      ),
+    [currentSocial],
+  );
+  const followerHandles = useMemo(
+    () =>
+      new Set(
+        currentSocial?.available
+          ? currentSocial.followers.map((member) => member.username.toLowerCase())
           : [],
       ),
     [currentSocial],
@@ -150,10 +162,25 @@ export default function App() {
             match.sharedLoves.length >= minSharedLoves &&
             match.divergences.length <= maxDivergences &&
             match.confidence >= minConfidence &&
-            (match.user.networkConnections ?? 0) >= minConnections,
+            (match.user.networkConnections ?? 0) >= minConnections &&
+            relationshipMatches(myFollowFilter, followingHandles.has(match.user.handle.toLowerCase())) &&
+            relationshipMatches(followsMeFilter, followerHandles.has(match.user.handle.toLowerCase())),
         )
         .slice(0, matchLimit),
-    [matchLimit, matches, maxDivergences, minCommon, minConfidence, minConnections, minScore, minSharedLoves],
+    [
+      followerHandles,
+      followsMeFilter,
+      followingHandles,
+      matchLimit,
+      matches,
+      maxDivergences,
+      minCommon,
+      minConfidence,
+      minConnections,
+      minScore,
+      minSharedLoves,
+      myFollowFilter,
+    ],
   );
   const recommendations = useMemo(() => (activeUser ? buildRecommendations(activeUser, matches) : []), [activeUser, matches]);
   const genreTerms = useMemo(() => (activeUser ? topTerms(activeUser, "genres") : []), [activeUser]);
@@ -727,6 +754,22 @@ export default function App() {
                     </button>
                   </div>
                   <label>
+                    {language === "tr" ? "Ben takip ediyorum" : "I follow"}
+                    <select value={myFollowFilter} onChange={(event) => setMyFollowFilter(event.target.value as RelationshipFilter)}>
+                      <option value="any">{language === "tr" ? "Fark etmez" : "Any"}</option>
+                      <option value="yes">{language === "tr" ? "Evet" : "Yes"}</option>
+                      <option value="no">{language === "tr" ? "Hayir" : "No"}</option>
+                    </select>
+                  </label>
+                  <label>
+                    {language === "tr" ? "Beni takip ediyor" : "Follows me"}
+                    <select value={followsMeFilter} onChange={(event) => setFollowsMeFilter(event.target.value as RelationshipFilter)}>
+                      <option value="any">{language === "tr" ? "Fark etmez" : "Any"}</option>
+                      <option value="yes">{language === "tr" ? "Evet" : "Yes"}</option>
+                      <option value="no">{language === "tr" ? "Hayir" : "No"}</option>
+                    </select>
+                  </label>
+                  <label>
                     {language === "tr" ? "Min ortak puanli" : "Min co-rated"}
                     <input
                       type="range"
@@ -813,13 +856,13 @@ export default function App() {
                   </summary>
                   <p>
                     {language === "tr"
-                      ? "Yalnizca iki kisinin de 0.5-5 arasinda puan verdigi filmler kullanilir. Watchlist ve puansiz izlemeler ortak sayilmaz. Benzer puan arti; ikinizin de 4+ vermesi ek arti; ikinizin de 2.5 ve alti vermesi kucuk arti; biri 4+ digeri 2.5 ve altiysa eksi yazar."
-                      : "Only films rated by both people are used. Watchlist and unrated watches do not count. Similar ratings add points, shared 4+ ratings add a bonus, shared 2.5-or-lower ratings add a smaller bonus, and love-versus-dislike splits subtract points."}
+                      ? "Yalnizca ikinizin de puan verdigi filmler kullanilir. 0-1 puan fark arti, 1.5 fark notr, 2 ve uzeri giderek eksi yazar. 2/4 gibi sevme-sevmeme ayrimi, 0.5/2.5 gibi iki dusuk puandan daha agir eksidir. Watchlist ve puansiz izlemeler ortak sayilmaz."
+                      : "Only films rated by both people count. A 0-1 point gap is positive, 1.5 is neutral, and gaps of 2 or more become increasingly negative. A 2/4 like-dislike split is penalized more than two low ratings such as 0.5/2.5. Watchlist and unrated films are excluded."}
                   </p>
                   <p>
                     {language === "tr"
-                      ? "Gecerlilik, ortak puanli film sayisidir: 20 ortak puanli film %100 kanit sayilir. Az veri varsa ham zevk puani 50'ye yaklastirilir."
-                      : "Validity comes from co-rated film count: 20 co-rated films is treated as 100% evidence. With sparse evidence, the raw taste score is pulled toward 50."}
+                      ? "Cok sayida ayrisma ek ceza getirir. Yerel agda az puanlanan veya gorusleri bolen filmler en fazla %50 daha agir sinyal olabilir. Gecerlilik ortak puanli film sayisina gore artar; az veri varsa ham puan 50'ye yaklastirilir."
+                      : "Many splits add an extra penalty. Films that are rare or divisive in the loaded network can carry up to 50% more weight. Validity rises with co-rated evidence; sparse evidence pulls the raw score toward 50."}
                   </p>
                 </details>
 
@@ -860,6 +903,14 @@ export default function App() {
 
             {tab === "profile" && (
               <section className="profile-layout">
+                <div className="panel share-explainer">
+                  <h2>{language === "tr" ? "Paylasim karti ne ise yarar?" : "What is the share card for?"}</h2>
+                  <p className="muted-line">
+                    {language === "tr"
+                      ? "Bu, Letterboxd veya sosyal medyada paylasabilecegin kisa zevk ozeti. Su an metni panoya kopyalar; film verini ya da sifreni internete yuklemez."
+                      : "This is a compact taste summary for Letterboxd or social media. It currently copies text to your clipboard and does not upload your film data or password."}
+                  </p>
+                </div>
                 <div className="share-card">
                   <div className="poster-strip" aria-hidden="true">
                     {activeUser.films.slice(0, 8).map((film, index) => (
@@ -988,15 +1039,20 @@ function SocialPanel({
     );
   }
 
+  const changeWindow = data.previousCheckedAt
+    ? language === "tr"
+      ? `${new Date(data.previousCheckedAt).toLocaleString("tr-TR")} ile ${new Date(data.checkedAt).toLocaleString("tr-TR")} arasinda degismis olabilir. Kesin an bilinmez.`
+      : `May have changed between ${new Date(data.previousCheckedAt).toLocaleString("en-US")} and ${new Date(data.checkedAt).toLocaleString("en-US")}. The exact moment is unknown.`
+    : undefined;
   const groups = [
-    [language === "tr" ? "Takip ettikleri" : "Following", data.counts.following, data.following],
-    [language === "tr" ? "Takipciler" : "Followers", data.counts.followers, data.followers],
-    [language === "tr" ? "Karsilikli" : "Mutuals", data.counts.mutuals, data.mutuals],
-    [language === "tr" ? "Seni takip etmeyenler" : "Not following back", data.counts.notFollowingBack, data.notFollowingBack],
-    [language === "tr" ? "Senin takip etmediklerin" : "Fans", data.counts.fans, data.fans],
-    [language === "tr" ? "Takipten cikanlar" : "Lost followers", data.lostFollowers.length, data.lostFollowers],
-    [language === "tr" ? "Yeni takipciler" : "New followers", data.newFollowers.length, data.newFollowers],
-  ] as const;
+    { label: language === "tr" ? "Takip ettikleri" : "Following", value: data.counts.following, members: data.following },
+    { label: language === "tr" ? "Takipciler" : "Followers", value: data.counts.followers, members: data.followers },
+    { label: language === "tr" ? "Karsilikli" : "Mutuals", value: data.counts.mutuals, members: data.mutuals },
+    { label: language === "tr" ? "Seni takip etmeyenler" : "Not following back", value: data.counts.notFollowingBack, members: data.notFollowingBack },
+    { label: language === "tr" ? "Senin takip etmediklerin" : "Fans", value: data.counts.fans, members: data.fans },
+    { label: language === "tr" ? "Takipten cikanlar" : "Lost followers", value: data.lostFollowers.length, members: data.lostFollowers, note: changeWindow },
+    { label: language === "tr" ? "Yeni takipciler" : "New followers", value: data.newFollowers.length, members: data.newFollowers, note: changeWindow },
+  ];
 
   return (
     <section className="social-layout">
@@ -1048,7 +1104,7 @@ function SocialPanel({
         </div>
       )}
       <div className="stats-grid social-stats">
-        {groups.map(([label, value]) => (
+        {groups.map(({ label, value }) => (
           <div className="stat-tile" key={label}>
             <Users size={18} />
             <strong>{value}</strong>
@@ -1071,6 +1127,7 @@ function SocialPanel({
                 ? "Bu tarama baslangic noktasi olarak kaydedildi."
                 : "This scan is saved as the baseline."}
           </strong>
+          {changeWindow && <p className="history-window">{changeWindow}</p>}
         </div>
         <button className="browser-scan-button" onClick={onResetHistory}>
           <RefreshCcw size={17} />
@@ -1093,8 +1150,8 @@ function SocialPanel({
             : "Lost followers appear from the second scan onward; this first scan is saved as the baseline."}
         </p>
       )}
-      {groups.map(([label, , members]) => (
-        <SocialMemberSection key={label} label={label} members={members} language={language} />
+      {groups.map(({ label, members, note }) => (
+        <SocialMemberSection key={label} label={label} members={members} language={language} note={note} />
       ))}
     </section>
   );
@@ -1104,10 +1161,12 @@ function SocialMemberSection({
   label,
   members,
   language,
+  note,
 }: {
   label: string;
   members: SocialMember[];
   language: Language;
+  note?: string;
 }) {
   const [query, setQuery] = useState("");
   const [visibleCount, setVisibleCount] = useState(100);
@@ -1128,6 +1187,7 @@ function SocialMemberSection({
         <h2>{label}</h2>
         <strong>{members.length}</strong>
       </div>
+      {note && <p className="muted-line history-window">{note}</p>}
       {members.length > 12 && (
         <label className="member-search">
           <Search size={16} />
@@ -1340,6 +1400,7 @@ function MatchCard({
           label={language === "tr" ? "ortak baglanti" : "mutual links"}
           value={match.user.networkConnections ?? 0}
         />
+        <Metric label={language === "tr" ? "nislik" : "niche"} value={match.nicheScore} />
       </div>
 
       <p className="coverage-line">
@@ -1363,10 +1424,14 @@ function MatchCard({
               {language === "tr"
                 ? match.togetherPick.kind === "mutual-watchlist"
                   ? " Film ikinizin de watchlistinde. Bu bilgi ancak iki tarafta da watchlist verisi varsa bulunabilir."
-                  : ` Film senin watchlistinde; ${match.user.displayName} filme en az 4 vermis.`
+                  : match.togetherPick.kind === "your-watchlist-they-loved"
+                    ? ` Film senin watchlistinde; ${match.user.displayName} filme en az 4 vermis.`
+                    : ` Film senin watchlistinde ve ortak sevdiginiz filmlerin yonetmen, tur ve ulke sinyallerine benziyor. Uyum: %${match.togetherPick.fitScore ?? 0}.`
                 : match.togetherPick.kind === "mutual-watchlist"
                   ? " The film is on both watchlists. This requires watchlist data from both people."
-                  : ` The film is on your watchlist and ${match.user.displayName} rated it at least 4.`}
+                  : match.togetherPick.kind === "your-watchlist-they-loved"
+                    ? ` The film is on your watchlist and ${match.user.displayName} rated it at least 4.`
+                    : ` The film is on your watchlist and resembles your shared loves by director, genre and country. Fit: ${match.togetherPick.fitScore ?? 0}%.`}
             </small>
           </span>
           <strong>
@@ -1424,8 +1489,8 @@ function MatchDetail({
 
         <p className="coverage-line">
           {language === "tr"
-            ? `${match.commonCount} ortak puanli film, gecerlilik %${match.confidence}. Ham uyum ${match.rawScore}; kanit azsa gosterilen skor ${match.score} olarak 50'ye yaklastirilir. Watchlist ve puansiz filmler hesaba katilmaz.`
-            : `${match.commonCount} co-rated films, ${match.confidence}% validity. Raw affinity is ${match.rawScore}; sparse evidence pulls the displayed score to ${match.score}. Watchlist and unrated films are excluded.`}
+            ? `${match.commonCount} ortak puanli film, gecerlilik %${match.confidence}. Ham uyum ${match.rawScore}; toplu ayrisma cezasi -${match.divergencePenalty}; yerel nislik ${match.nicheScore}/100. Kanit azsa skor 50'ye yaklastirilir. Watchlist ve puansiz filmler hesaba katilmaz.`
+            : `${match.commonCount} co-rated films, ${match.confidence}% validity. Raw affinity ${match.rawScore}; repeated-split penalty -${match.divergencePenalty}; local niche score ${match.nicheScore}/100. Sparse evidence pulls the score toward 50. Watchlist and unrated films are excluded.`}
         </p>
 
         <div className="detail-section">
@@ -1435,7 +1500,7 @@ function MatchDetail({
               <span>{language === "tr" ? "Film" : "Film"}</span>
               <span>{language === "tr" ? "Sen" : "You"}</span>
               <span>{match.user.displayName}</span>
-              <span>{language === "tr" ? "Etki" : "Impact"}</span>
+              <span>{language === "tr" ? "Etki / agirlik" : "Impact / weight"}</span>
             </div>
             {match.commonFilms.map((item) => (
               <div className="rating-row" key={item.film.key}>
@@ -1443,7 +1508,7 @@ function MatchDetail({
                 <strong>{formatRating(item.targetRating)}</strong>
                 <strong>{formatRating(item.candidateRating)}</strong>
                 <span className={item.impact >= 0 ? "positive-impact" : "negative-impact"}>
-                  {item.impact >= 0 ? "+" : ""}{item.impact}
+                  {item.impact >= 0 ? "+" : ""}{item.impact} · {item.discriminativeWeight.toFixed(2)}x
                 </span>
               </div>
             ))}
@@ -1508,6 +1573,10 @@ function Avatar({ name, src, large = false }: { name: string; src?: string; larg
 
 function formatRating(rating?: number) {
   return rating === undefined ? "—" : `${rating.toFixed(rating % 1 ? 1 : 0)} ★`;
+}
+
+function relationshipMatches(filter: RelationshipFilter, value: boolean) {
+  return filter === "any" || (filter === "yes" ? value : !value);
 }
 
 function Metric({ label, value }: { label: string; value: number }) {

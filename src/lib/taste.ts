@@ -56,10 +56,11 @@ export function decadeTerms(user: UserTaste, limit = 6) {
 
 export function buildMatches(target: UserTaste, users: UserTaste[]): MatchResult[] {
   const targetMap = new Map(target.films.map((film) => [film.key, film]));
+  const community = buildCommunityStats([target, ...users]);
 
   return users
     .filter((user) => user.id !== target.id)
-    .map((user) => scoreUser(target, targetMap, user))
+    .map((user) => scoreUser(target, targetMap, user, community))
     .sort((a, b) => b.score - a.score);
 }
 
@@ -70,12 +71,13 @@ export async function buildMatchesAsync(
 ): Promise<MatchResult[]> {
   const candidates = users.filter((user) => user.id !== target.id);
   const targetMap = new Map(target.films.map((film) => [film.key, film]));
+  const community = buildCommunityStats([target, ...users]);
   const results: MatchResult[] = [];
   const chunkSize = 24;
 
   for (let offset = 0; offset < candidates.length; offset += chunkSize) {
     const chunk = candidates.slice(offset, offset + chunkSize);
-    for (const candidate of chunk) results.push(scoreUser(target, targetMap, candidate));
+    for (const candidate of chunk) results.push(scoreUser(target, targetMap, candidate, community));
     onProgress?.(Math.min(offset + chunk.length, candidates.length), candidates.length);
     await yieldToBrowser();
   }
@@ -110,8 +112,10 @@ function scoreUser(
   target: UserTaste,
   targetMap: Map<string, FilmSignal>,
   candidate: UserTaste,
+  community: CommunityStats,
 ): MatchResult {
   let totalImpact = 0;
+  let totalWeight = 0;
   const sharedLoves: FilmSignal[] = [];
   const sharedDislikes: FilmSignal[] = [];
   const divergences: MatchResult["divergences"] = [];
@@ -128,34 +132,49 @@ function scoreUser(
     const candidateDisliked = candidateRating <= 2.5;
     const difference = Math.abs(targetRating - candidateRating);
     const agreement = Math.round(clamp(1 - difference / 4.5, 0, 1) * 100);
-    let impact = Math.round(agreement - 50);
+    const filmStats = community.films.get(targetFilm.key);
+    const discriminativeWeight = getDiscriminativeWeight(filmStats, community.maxRatings);
+    let impact = scoreRatingPair(targetRating, candidateRating);
     let signal: MatchResult["commonFilms"][number]["signal"] = "agreement";
 
     if (targetLoved && candidateLoved) {
-      impact += 10;
       signal = "shared-love";
       sharedLoves.push(targetFilm);
     } else if (targetDisliked && candidateDisliked) {
-      impact += 6;
       signal = "shared-dislike";
       sharedDislikes.push(targetFilm);
-    } else if ((targetLoved && candidateDisliked) || (targetDisliked && candidateLoved)) {
-      impact -= 15;
+    } else if (difference >= 1.5) {
       signal = "divergence";
       divergences.push({ film: targetFilm, targetRating, candidateRating });
     }
-    impact = Math.round(clamp(impact, -65, 60));
+    impact = Math.round(clamp(impact * discriminativeWeight, -90, 75));
     totalImpact += impact;
-    commonFilms.push({ film: targetFilm, targetRating, candidateRating, agreement, impact, signal });
+    totalWeight += discriminativeWeight;
+    commonFilms.push({
+      film: targetFilm,
+      targetRating,
+      candidateRating,
+      agreement,
+      impact,
+      discriminativeWeight,
+      communityMean: filmStats?.mean,
+      communityRatings: filmStats?.count ?? 0,
+      signal,
+    });
   }
 
   const commonCount = commonFilms.length;
-  const rawScore = commonCount ? Math.round(clamp(50 + totalImpact / commonCount, 0, 99)) : 0;
-  const confidence = Math.round(clamp(commonCount / 20, 0, 1) * 100);
+  const divergenceRatio = commonCount ? divergences.length / commonCount : 0;
+  const divergencePenalty = Math.round(18 * divergenceRatio ** 1.35);
+  const rawScore = commonCount
+    ? Math.round(clamp(50 + totalImpact / Math.max(totalWeight, 1) - divergencePenalty, 0, 99))
+    : 0;
+  const confidence = Math.round(clamp(1 - Math.exp(-commonCount / 8), 0, 1) * 100);
   const evidenceFactor = confidence / 100;
   const score = commonCount ? Math.round(50 + (rawScore - 50) * evidenceFactor) : 0;
 
-  const togetherPick = pickWatchlistFilm(target, candidate);
+  const togetherPick = pickWatchlistFilm(target, candidate, commonFilms);
+  const nicheScore = calculateNicheScore(candidate, community);
 
   return {
     user: candidate,
@@ -172,12 +191,59 @@ function scoreUser(
     sharedLoves: uniqueByKey(sharedLoves),
     sharedDislikes: uniqueByKey(sharedDislikes),
     divergences,
+    divergencePenalty,
+    nicheScore,
     reasons: buildReasons(target, candidate, sharedLoves, sharedDislikes, divergences),
     togetherPick,
   };
 }
 
-function pickWatchlistFilm(target: UserTaste, candidate: UserTaste): MatchResult["togetherPick"] {
+export function scoreRatingPair(a: number, b: number) {
+  const difference = Math.abs(a - b);
+  const gapPoints = interpolateGapScore(difference);
+  const bothLoved = a >= 4 && b >= 4;
+  const bothDisliked = a <= 2.5 && b <= 2.5;
+  const bothNeutral = a >= 3 && a < 4 && b >= 3 && b < 4;
+  const loveDislike = (a >= 4 && b <= 2.5) || (b >= 4 && a <= 2.5);
+  const loveNeutral = (a >= 4 && b >= 3 && b < 4) || (b >= 4 && a >= 3 && a < 4);
+
+  let score = gapPoints;
+  if (bothLoved) score += 15;
+  else if (bothDisliked) score += 8;
+  else if (bothNeutral) score += 4;
+  if (loveDislike) score -= 25;
+  else if (loveNeutral) score -= 8;
+  return Math.round(clamp(score, -75, 65));
+}
+
+function interpolateGapScore(difference: number) {
+  const points = [
+    [0, 45],
+    [0.5, 34],
+    [1, 18],
+    [1.5, 0],
+    [2, -18],
+    [2.5, -32],
+    [3, -45],
+    [3.5, -55],
+    [4.5, -65],
+  ] as const;
+  for (let index = 1; index < points.length; index += 1) {
+    const [rightGap, rightScore] = points[index];
+    const [leftGap, leftScore] = points[index - 1];
+    if (difference <= rightGap) {
+      const ratio = (difference - leftGap) / (rightGap - leftGap);
+      return leftScore + (rightScore - leftScore) * ratio;
+    }
+  }
+  return points.at(-1)?.[1] ?? -65;
+}
+
+function pickWatchlistFilm(
+  target: UserTaste,
+  candidate: UserTaste,
+  commonFilms: MatchResult["commonFilms"],
+): MatchResult["togetherPick"] {
   const candidateMap = new Map(candidate.films.map((film) => [film.key, film]));
   const mutualWatchlist = target.films
     .filter((film) => film.watchlist && candidateMap.get(film.key)?.watchlist)
@@ -194,7 +260,90 @@ function pickWatchlistFilm(target: UserTaste, candidate: UserTaste): MatchResult
     .sort((a, b) => (b.candidateRating ?? 0) - (a.candidateRating ?? 0) || a.film.title.localeCompare(b.film.title))[0];
   return yourWatchlistTheyLoved
     ? { ...yourWatchlistTheyLoved, kind: "your-watchlist-they-loved" }
-    : undefined;
+    : pickTasteFitWatchlist(target, commonFilms);
+}
+
+function pickTasteFitWatchlist(
+  target: UserTaste,
+  commonFilms: MatchResult["commonFilms"],
+): MatchResult["togetherPick"] {
+  const seeds = commonFilms
+    .filter((item) => item.targetRating >= 4 && item.candidateRating >= 4)
+    .map((item) => item.film);
+  if (!seeds.length) return undefined;
+
+  const ranked = target.films
+    .filter((film) => film.watchlist)
+    .map((film) => {
+      const directorOverlap = overlapRatio(film.directors, seeds.flatMap((seed) => seed.directors));
+      const genreOverlap = overlapRatio(film.genres, seeds.flatMap((seed) => seed.genres));
+      const countryOverlap = overlapRatio(film.countries, seeds.flatMap((seed) => seed.countries));
+      const fitScore = Math.round((directorOverlap * 0.5 + genreOverlap * 0.35 + countryOverlap * 0.15) * 100);
+      return { film, fitScore, directorOverlap, genreOverlap };
+    })
+    .filter((item) => item.fitScore > 0)
+    .sort((a, b) => b.fitScore - a.fitScore)[0];
+  if (!ranked) return undefined;
+  const reason = ranked.directorOverlap > 0
+    ? "Shared-loved films have a director overlap."
+    : ranked.genreOverlap > 0
+      ? "Shared-loved films have a genre overlap."
+      : "Shared-loved films have a country overlap.";
+  return { film: ranked.film, kind: "taste-fit-watchlist", fitScore: ranked.fitScore, reason };
+}
+
+type FilmCommunityStat = { count: number; mean: number; variance: number };
+type CommunityStats = { films: Map<string, FilmCommunityStat>; maxRatings: number };
+
+function buildCommunityStats(users: UserTaste[]): CommunityStats {
+  const ratings = new Map<string, number[]>();
+  const uniqueUsers = [...new Map(users.map((user) => [user.id, user])).values()];
+  for (const user of uniqueUsers) {
+    for (const film of user.films) {
+      if (film.rating === undefined) continue;
+      const values = ratings.get(film.key) ?? [];
+      values.push(film.rating);
+      ratings.set(film.key, values);
+    }
+  }
+  const films = new Map<string, FilmCommunityStat>();
+  let maxRatings = 0;
+  for (const [key, values] of ratings) {
+    const mean = values.reduce((sum, value) => sum + value, 0) / values.length;
+    const variance = values.reduce((sum, value) => sum + (value - mean) ** 2, 0) / values.length;
+    films.set(key, { count: values.length, mean, variance });
+    maxRatings = Math.max(maxRatings, values.length);
+  }
+  return { films, maxRatings };
+}
+
+function getDiscriminativeWeight(stat: FilmCommunityStat | undefined, maxRatings: number) {
+  if (!stat || maxRatings < 2) return 1;
+  const reliability = clamp((stat.count - 2) / 8, 0, 1);
+  const controversy = clamp(Math.sqrt(stat.variance) / 1.4, 0, 1) * reliability;
+  const rarity = clamp(1 - Math.log1p(stat.count) / Math.log1p(maxRatings), 0, 1);
+  return Number((1 + controversy * 0.35 + rarity * 0.15).toFixed(2));
+}
+
+function calculateNicheScore(candidate: UserTaste, community: CommunityStats) {
+  let weightedDeviation = 0;
+  let evidence = 0;
+  for (const film of candidate.films) {
+    if (film.rating === undefined) continue;
+    const stat = community.films.get(film.key);
+    if (!stat || stat.count < 3) continue;
+    const reliability = clamp((stat.count - 2) / 8, 0, 1);
+    weightedDeviation += Math.abs(film.rating - stat.mean) * reliability;
+    evidence += reliability;
+  }
+  if (!evidence) return 0;
+  return Math.round(clamp((weightedDeviation / evidence / 2) * 100, 0, 100));
+}
+
+function overlapRatio(aValues: string[], bValues: string[]) {
+  if (!aValues.length || !bValues.length) return 0;
+  const b = new Set(bValues.map((value) => value.toLowerCase()));
+  return aValues.filter((value) => b.has(value.toLowerCase())).length / aValues.length;
 }
 
 function buildReasons(

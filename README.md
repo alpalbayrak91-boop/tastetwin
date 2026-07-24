@@ -31,7 +31,9 @@ TasteTwin is a local-first Letterboxd social graph and movie taste matching app.
 
 Network candidates are ranked by how often they appear across the following lists that were scanned. RSS matching is processed in small batches and the result count is user-controlled, so the interface remains usable during large calculations.
 
-The displayed taste score uses only films rated by both people. Similar ratings add evidence, shared high and low ratings add bonuses, and love-versus-dislike splits subtract points. Sparse comparisons are pulled toward a neutral score of 50 and shown with a separate validity percentage.
+The displayed taste score uses only films rated by both people. Rating gaps of 0-1 are positive, 1.5 is neutral, and gaps of 2 or more become increasingly negative. Sentiment context matters: a 2/4 split is penalized more than 0.5/2.5, repeated splits add an extra penalty, and locally rare or divisive films can carry more weight. Sparse comparisons are pulled toward a neutral score of 50 and shown with a separate validity percentage.
+
+The current scoring model, social-data limits, TMDB recommendation plan, and known gaps are recorded in [docs/PRODUCT-NOTES.md](docs/PRODUCT-NOTES.md).
 
 Windows may show an unknown publisher warning until the installer is code-signed.
 

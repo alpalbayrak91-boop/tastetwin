@@ -1080,6 +1080,17 @@ select {
   align-items: start;
 }
 
+.share-explainer {
+  grid-column: 1 / -1;
+}
+
+.history-window {
+  margin: 8px 0 0;
+  color: var(--red);
+  font-size: 13px;
+  font-weight: 750;
+}
+
 .social-layout {
   display: grid;
   gap: 16px;

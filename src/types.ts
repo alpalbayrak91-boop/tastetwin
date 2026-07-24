@@ -43,16 +43,23 @@ export type MatchResult = {
     candidateRating: number;
     agreement: number;
     impact: number;
+    discriminativeWeight: number;
+    communityMean?: number;
+    communityRatings: number;
     signal: "shared-love" | "shared-dislike" | "divergence" | "agreement";
   }>;
   sharedLoves: FilmSignal[];
   sharedDislikes: FilmSignal[];
   divergences: Array<{ film: FilmSignal; targetRating?: number; candidateRating?: number }>;
+  divergencePenalty: number;
+  nicheScore: number;
   reasons: string[];
   togetherPick?: {
     film: FilmSignal;
-    kind: "mutual-watchlist" | "your-watchlist-they-loved";
+    kind: "mutual-watchlist" | "your-watchlist-they-loved" | "taste-fit-watchlist";
     candidateRating?: number;
+    fitScore?: number;
+    reason?: string;
   };
 };
 
