@@ -126,7 +126,7 @@ const server = createServer(async (req, res) => {
         if (!key || !title) continue;
         const cacheKey = `${title.toLowerCase()}|${year ?? ""}`;
         let metadata = tmdbCache.get(cacheKey);
-        if (!metadata) {
+        if (!metadata || metadata.metadataVersion !== 2) {
           metadata = await fetchTmdbMetadata(title, year, token);
           if (metadata) tmdbCache.set(cacheKey, metadata);
         }
@@ -308,6 +308,7 @@ async function fetchLetterboxdUser(rawHandle) {
   const films = [...byKey.values()].sort((a, b) => (b.rating ?? 0) - (a.rating ?? 0));
   const activity = calculateActivity(films);
   return {
+    metadataVersion: 2,
     id: `rss-${handle}`,
     handle,
     displayName,
@@ -899,15 +900,23 @@ async function fetchTmdbMetadata(title, year, token) {
 }
 
 async function tmdbFetch(route, token) {
-  const response = await fetch(`https://api.themoviedb.org/3${route}`, {
-    headers: {
-      Authorization: `Bearer ${token}`,
-      Accept: "application/json",
-    },
-  });
-  const body = await response.json().catch(() => ({}));
-  if (!response.ok) throw new Error(body.status_message ?? `tmdb_${response.status}`);
-  return body;
+  for (let attempt = 0; attempt < 4; attempt += 1) {
+    const response = await fetch(`https://api.themoviedb.org/3${route}`, {
+      headers: {
+        Authorization: `Bearer ${token}`,
+        Accept: "application/json",
+      },
+    });
+    const body = await response.json().catch(() => ({}));
+    if (response.ok) return body;
+    if ((response.status === 429 || response.status >= 500) && attempt < 3) {
+      const retryAfter = Number(response.headers.get("retry-after"));
+      await delay(Number.isFinite(retryAfter) && retryAfter > 0 ? retryAfter * 1000 : 750 * 2 ** attempt);
+      continue;
+    }
+    throw new Error(body.status_message ?? `tmdb_${response.status}`);
+  }
+  throw new Error("tmdb_retry_exhausted");
 }
 
 async function restoreTmdbCache() {
