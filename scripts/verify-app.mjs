@@ -77,7 +77,19 @@ await page.evaluate(async () => {
     displayName: "Candidate",
     avatarUrl: "/brand/tastetwin-icon.png",
     networkConnections: 3,
+    networkConnectionWeight: 1.25,
     connectionHandles: ["friendone", "friendtwo", "friendthree"],
+    connectionDetails: ["friendone", "friendtwo", "friendthree"].map((handle, index) => ({
+      handle,
+      displayName: `Friend ${index + 1}`,
+      avatarUrl: "/brand/tastetwin-icon.png",
+      followingCount: 100 + index * 50,
+      weight: 0.4,
+    })),
+    lastActivityAt: new Date(Date.now() - 2 * 24 * 60 * 60 * 1000).toISOString(),
+    activity30Days: 7,
+    activity90Days: 15,
+    activityScore: 82,
     importedAt: new Date().toISOString(),
     source: "rss",
     films: [
@@ -110,7 +122,15 @@ await page.evaluate(async () => {
   };
   const nextState = {
     ...state,
-    users: [owner, candidate],
+    users: [
+      owner,
+      ...Array.from({ length: 55 }, (_, index) => ({
+        ...candidate,
+        id: `rss-candidate-${index}`,
+        handle: `candidate${String(index).padStart(2, "0")}`,
+        displayName: `Candidate ${index}`,
+      })),
+    ],
     activeId: owner.id,
     accountHandle: owner.handle,
     socialByHandle: { [owner.handle]: social },
@@ -127,8 +147,18 @@ await page.evaluate(async () => {
 await page.reload({ waitUntil: "networkidle" });
 await page.locator(".tabs button").nth(1).click();
 await page.locator(".match-card").first().waitFor();
+if ((await page.locator(".scope-control").count()) !== 0) throw new Error("Redundant scope control still visible");
+if ((await page.locator('.filter-band input[type="number"]').count()) < 8) throw new Error("Numeric filters missing");
+if (!(await page.locator(".match-pagination").innerText()).includes("1 / 2")) throw new Error("Match pagination missing");
+await page.locator(".match-pagination button").last().click();
+if ((await page.locator(".match-card").count()) !== 5) throw new Error("Second match page has the wrong size");
+await page.locator(".match-pagination button").first().click();
+await page.screenshot({ path: screenshotPath.replace(/\.png$/i, "-matches.png"), fullPage: true });
 if (!(await page.locator(".match-card").first().innerText()).includes("3\nortak baglanti")) {
   throw new Error("Mutual connection count missing from match card");
+}
+if (!(await page.locator(".match-card .activity-line").first().innerText()).includes("2 gun once")) {
+  throw new Error("Recent film activity missing from match card");
 }
 const coverage = await page.locator(".coverage-line").first().innerText();
 const score = Number(await page.locator(".radial-score strong").first().innerText());
@@ -139,10 +169,11 @@ await page.locator(".match-dialog").waitFor();
 const commonRows = await page.locator(".match-dialog .rating-row:not(.rating-head)").count();
 if (commonRows !== 3) throw new Error(`Expected 3 rated common-film rows, found ${commonRows}`);
 if ((await page.locator(".match-card .profile-avatar").count()) === 0) throw new Error("Match avatar missing");
-if (!(await page.locator(".together-pick").innerText()).includes("Watchlist Only")) {
+if (!(await page.locator(".together-pick").first().innerText()).includes("Watchlist Only")) {
   throw new Error("Watchlist recommendation missing");
 }
 if ((await page.locator(".connection-list a").count()) !== 3) throw new Error("Mutual connection list missing");
+if ((await page.locator(".connection-list img").count()) !== 3) throw new Error("Mutual connection avatars missing");
 if ((await page.locator(".negative-impact").count()) !== 1) throw new Error("Divergence penalty missing");
 await page.screenshot({ path: screenshotPath.replace(/\.png$/i, "-detail.png") });
 await page.locator(".match-dialog .dialog-actions button").click();

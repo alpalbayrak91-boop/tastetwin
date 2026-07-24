@@ -23,7 +23,19 @@ try {
       capturedAt,
       following: [member("alpha"), member("beta"), member("gamma")],
       followers: [member("alpha"), member("delta")],
-      network: { nodes: 5, edges: 6, capped: false, handles: ["tastetwincheck", "alpha", "beta", "gamma", "delta"] },
+      network: {
+        nodes: 7,
+        edges: 9,
+        capped: false,
+        connectorsScanned: 2,
+        candidateCount: 2,
+        completedAt: capturedAt,
+        handles: ["epsilon", "zeta"],
+        candidates: [
+          candidate("epsilon", "alpha", 120, 0.42),
+          candidate("zeta", "delta", 900, 0.29),
+        ],
+      },
     }),
   });
   if (!bridgeResponse.ok) throw new Error(`Bridge POST failed: ${bridgeResponse.status}`);
@@ -35,11 +47,14 @@ try {
   if (social.source !== "browser-extension" || social.counts.following !== 3 || social.counts.followers !== 2) {
     throw new Error(`Restored social data is invalid: ${JSON.stringify(social)}`);
   }
-  if (network.total !== 4 || network.handles.length !== 4) {
+  if (network.total !== 2 || network.handles.length !== 2) {
     throw new Error(`Restored network data is invalid: ${JSON.stringify(network)}`);
   }
+  if (network.members[0].viaDetails?.[0]?.handle !== "alpha" || !network.members[0].connectionWeight) {
+    throw new Error(`Weighted connection details were not restored: ${JSON.stringify(network.members[0])}`);
+  }
   if (social.checkedAt !== capturedAt) throw new Error(`Capture time was not preserved: ${social.checkedAt}`);
-  console.log(JSON.stringify({ restored: true, following: 3, followers: 2, networkNodes: 5, checkedAt: social.checkedAt }));
+  console.log(JSON.stringify({ restored: true, following: 3, followers: 2, networkNodes: 7, weightedConnections: true, checkedAt: social.checkedAt }));
 } finally {
   if (child && child.exitCode === null) await stopServer(child);
   await rm(testDirectory, { recursive: true, force: true });
@@ -47,6 +62,16 @@ try {
 
 function member(username) {
   return { username, displayName: username };
+}
+
+function candidate(username, via, followingCount, weight) {
+  return {
+    ...member(username),
+    connections: 1,
+    connectionWeight: weight,
+    via: [via],
+    viaDetails: [{ username: via, displayName: via, followingCount, weight }],
+  };
 }
 
 function startServer() {

@@ -17,6 +17,7 @@ const dataDir = process.env.TASTETWIN_DATA_DIR
   ? path.resolve(process.env.TASTETWIN_DATA_DIR)
   : path.join(__dirname, "data");
 const bridgeCacheFile = path.join(dataDir, "bridge-cache.json");
+const tmdbCacheFile = path.join(dataDir, "tmdb-cache.json");
 const preparedExtensionDir = path.join(dataDir, "chrome-extension");
 const port = Number(process.env.PORT ?? 5173);
 const parser = new XMLParser({
@@ -27,11 +28,12 @@ const execFileAsync = promisify(execFile);
 const browserUserAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/126 Safari/537.36";
 const socialCache = new Map();
 const bridgeCache = new Map();
+const tmdbCache = new Map();
 const SOCIAL_CACHE_MS = 5 * 60 * 1000;
 const BRIDGE_CACHE_MS = 30 * 24 * 60 * 60 * 1000;
 const PUBLIC_SOCIAL_PAGE_LIMIT = 8;
 
-await restoreBridgeCache();
+await Promise.all([restoreBridgeCache(), restoreTmdbCache()]);
 
 const server = createServer(async (req, res) => {
   try {
@@ -61,6 +63,40 @@ const server = createServer(async (req, res) => {
         execFile("explorer.exe", [preparedExtensionDir], () => undefined);
       }
       sendJson(res, 200, { ok: true, path: preparedExtensionDir });
+      return;
+    }
+
+    if (url.pathname === "/api/tmdb/validate" && req.method === "POST") {
+      const body = await readJsonBody(req);
+      const token = normalizeTmdbToken(body.token);
+      await tmdbFetch("/authentication", token);
+      sendJson(res, 200, { ok: true });
+      return;
+    }
+
+    if (url.pathname === "/api/tmdb/enrich" && req.method === "POST") {
+      const body = await readJsonBody(req);
+      const token = normalizeTmdbToken(body.token);
+      if (!Array.isArray(body.films) || body.films.length > 50) {
+        sendJson(res, 400, { error: "films_required_or_batch_too_large" });
+        return;
+      }
+      const results = [];
+      for (const rawFilm of body.films) {
+        const key = String(rawFilm?.key ?? "").slice(0, 300);
+        const title = String(rawFilm?.title ?? "").trim().slice(0, 300);
+        const year = Number.parseInt(rawFilm?.year, 10) || undefined;
+        if (!key || !title) continue;
+        const cacheKey = `${title.toLowerCase()}|${year ?? ""}`;
+        let metadata = tmdbCache.get(cacheKey);
+        if (!metadata) {
+          metadata = await fetchTmdbMetadata(title, year, token);
+          if (metadata) tmdbCache.set(cacheKey, metadata);
+        }
+        if (metadata) results.push({ key, ...metadata });
+      }
+      await persistTmdbCache();
+      sendJson(res, 200, { results });
       return;
     }
 
@@ -224,18 +260,24 @@ async function fetchLetterboxdUser(rawHandle) {
       current.watchedDates = [...new Set([...current.watchedDates, ...film.watchedDates])];
       current.review = current.review || film.review;
       current.posterUrl = current.posterUrl || film.posterUrl;
+      if (Date.parse(film.activityDate ?? "") > Date.parse(current.activityDate ?? "")) {
+        current.activityDate = film.activityDate;
+      }
       continue;
     }
     byKey.set(film.key, film);
   }
 
+  const films = [...byKey.values()].sort((a, b) => (b.rating ?? 0) - (a.rating ?? 0));
+  const activity = calculateActivity(films);
   return {
     id: `rss-${handle}`,
     handle,
     displayName,
     importedAt: new Date().toISOString(),
     source: "rss",
-    films: [...byKey.values()].sort((a, b) => (b.rating ?? 0) - (a.rating ?? 0)),
+    ...activity,
+    films,
   };
 }
 
@@ -290,13 +332,22 @@ function socialFromExtension(payload) {
     const nodes = Number(network.nodes);
     const edges = Number(network.edges);
     if (Number.isInteger(nodes) && nodes >= 0 && nodes <= 10000 && Number.isInteger(edges) && edges >= 0 && edges <= 100000) {
-      social.network = { nodes, edges, capped: Boolean(network.capped) };
+      social.network = {
+        nodes,
+        edges,
+        capped: Boolean(network.capped),
+        connectorsScanned: Math.max(0, Math.min(10000, Number.parseInt(network.connectorsScanned, 10) || 0)),
+        failedConnectors: Math.max(0, Math.min(10000, Number.parseInt(network.failedConnectors, 10) || 0)),
+        candidateCount: Math.max(0, Math.min(10000, Number.parseInt(network.candidateCount, 10) || 0)),
+        completedAt: typeof network.completedAt === "string" ? network.completedAt : undefined,
+      };
     }
     if (Array.isArray(network.handles) && network.handles.length <= 10000) {
       const handles = [...new Set(network.handles.map((value) => String(value).toLowerCase()).filter((value) => /^[a-z0-9_-]{2,32}$/.test(value)))];
       social.networkHandles = handles.filter((value) => value !== handle);
       social.network = {
-        nodes: social.networkHandles.length + 1,
+        ...social.network,
+        nodes: social.network?.nodes ?? social.networkHandles.length + 1,
         edges: social.network?.edges ?? 0,
         capped: Boolean(network.capped),
       };
@@ -311,13 +362,34 @@ function socialFromExtension(payload) {
           const via = Array.isArray(raw?.via)
             ? [...new Set(raw.via.map((value) => String(value).toLowerCase()).filter((value) => /^[a-z0-9_-]{2,32}$/.test(value)))].slice(0, 1000)
             : [];
+          const viaDetails = Array.isArray(raw?.viaDetails)
+            ? raw.viaDetails
+                .map((detail) => {
+                  const username = String(detail?.username ?? detail?.handle ?? "").toLowerCase();
+                  if (!/^[a-z0-9_-]{2,32}$/.test(username)) return undefined;
+                  return {
+                    handle: username,
+                    displayName: String(detail?.displayName ?? username).slice(0, 100),
+                    avatarUrl:
+                      typeof detail?.avatarUrl === "string" && detail.avatarUrl.startsWith("https://")
+                        ? detail.avatarUrl
+                        : undefined,
+                    followingCount: Math.max(0, Math.min(10000, Number.parseInt(detail?.followingCount, 10) || 0)),
+                    weight: Math.max(0, Math.min(1, Number(detail?.weight) || 0)),
+                  };
+                })
+                .filter(Boolean)
+                .slice(0, 1000)
+            : [];
           return {
             ...member,
             connections: Math.max(1, Math.min(10000, Number.parseInt(raw?.connections, 10) || via.length || 1)),
+            connectionWeight: Math.max(0, Math.min(10000, Number(raw?.connectionWeight) || viaDetails.reduce((sum, detail) => sum + detail.weight, 0))),
             via,
+            viaDetails,
           };
         })
-        .sort((a, b) => b.connections - a.connections || a.username.localeCompare(b.username));
+        .sort((a, b) => b.connectionWeight - a.connectionWeight || b.connections - a.connections || a.username.localeCompare(b.username));
       social.networkHandles = social.networkCandidates.map((member) => member.username);
     }
   }
@@ -610,6 +682,28 @@ function filmFromRssItem(item) {
     countries: [],
     posterUrl,
     tmdbId,
+    activityDate: text(item.pubDate) || text(item["letterboxd:watchedDate"]) || undefined,
+  };
+}
+
+function calculateActivity(films) {
+  const dates = films
+    .flatMap((film) => [film.activityDate, ...film.watchedDates])
+    .map((value) => Date.parse(value ?? ""))
+    .filter(Number.isFinite)
+    .sort((a, b) => b - a);
+  if (!dates.length) return { activity30Days: 0, activity90Days: 0, activityScore: 0 };
+  const now = Date.now();
+  const activity30Days = dates.filter((date) => now - date <= 30 * 24 * 60 * 60 * 1000).length;
+  const activity90Days = dates.filter((date) => now - date <= 90 * 24 * 60 * 60 * 1000).length;
+  const recencyDays = Math.max(0, (now - dates[0]) / (24 * 60 * 60 * 1000));
+  const recencyScore = Math.max(0, 100 - recencyDays * 2);
+  const frequencyScore = Math.min(100, activity30Days * 12 + activity90Days * 3);
+  return {
+    lastActivityAt: new Date(dates[0]).toISOString(),
+    activity30Days,
+    activity90Days,
+    activityScore: Math.round(recencyScore * 0.65 + frequencyScore * 0.35),
   };
 }
 
@@ -711,6 +805,75 @@ async function persistBridgeCache() {
   const temporaryFile = `${bridgeCacheFile}.tmp`;
   await writeFile(temporaryFile, JSON.stringify(serialized), "utf8");
   await rename(temporaryFile, bridgeCacheFile);
+}
+
+function normalizeTmdbToken(value) {
+  const token = String(value ?? "").trim();
+  if (token.length < 40 || token.length > 2048 || /[\r\n]/.test(token)) {
+    throw new Error("invalid_tmdb_read_access_token");
+  }
+  return token;
+}
+
+async function fetchTmdbMetadata(title, year, token) {
+  const search = await tmdbFetch(
+    `/search/movie?query=${encodeURIComponent(title)}${year ? `&year=${year}` : ""}&include_adult=false`,
+    token,
+  );
+  const match = search.results?.[0];
+  if (!match?.id) return undefined;
+  const details = await tmdbFetch(
+    `/movie/${match.id}?append_to_response=credits,keywords,recommendations`,
+    token,
+  );
+  return {
+    tmdbId: String(details.id),
+    posterUrl: details.poster_path ? `https://image.tmdb.org/t/p/w500${details.poster_path}` : undefined,
+    genres: Array.isArray(details.genres) ? details.genres.map((genre) => String(genre.name)).filter(Boolean) : [],
+    directors: Array.isArray(details.credits?.crew)
+      ? details.credits.crew
+          .filter((person) => person.job === "Director")
+          .map((person) => String(person.name))
+          .filter(Boolean)
+      : [],
+    countries: Array.isArray(details.production_countries)
+      ? details.production_countries.map((country) => String(country.name)).filter(Boolean)
+      : [],
+    keywords: Array.isArray(details.keywords?.keywords)
+      ? details.keywords.keywords.map((keyword) => String(keyword.name)).filter(Boolean)
+      : [],
+    tmdbRecommendations: Array.isArray(details.recommendations?.results)
+      ? details.recommendations.results.slice(0, 100).map((film) => String(film.id))
+      : [],
+  };
+}
+
+async function tmdbFetch(route, token) {
+  const response = await fetch(`https://api.themoviedb.org/3${route}`, {
+    headers: {
+      Authorization: `Bearer ${token}`,
+      Accept: "application/json",
+    },
+  });
+  const body = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error(body.status_message ?? `tmdb_${response.status}`);
+  return body;
+}
+
+async function restoreTmdbCache() {
+  try {
+    const raw = JSON.parse(await readFile(tmdbCacheFile, "utf8"));
+    for (const [key, value] of Object.entries(raw)) tmdbCache.set(key, value);
+  } catch (error) {
+    if (error?.code !== "ENOENT") console.warn("[tmdb] cache restore failed", errorMessage(error));
+  }
+}
+
+async function persistTmdbCache() {
+  await mkdir(dataDir, { recursive: true });
+  const temporaryFile = `${tmdbCacheFile}.tmp`;
+  await writeFile(temporaryFile, JSON.stringify(Object.fromEntries(tmdbCache)), "utf8");
+  await rename(temporaryFile, tmdbCacheFile);
 }
 
 function delay(ms) {

@@ -11,12 +11,14 @@ import {
   Globe2,
   Heart,
   Info,
+  KeyRound,
   Languages,
   Link2,
   Loader2,
   RefreshCcw,
   Search,
   Star,
+  Sparkles,
   ThumbsDown,
   UserCheck,
   UserMinus,
@@ -26,13 +28,17 @@ import {
 import { useEffect, useMemo, useState } from "react";
 import { t } from "./i18n";
 import { readLetterboxdExport } from "./lib/letterboxd";
+import {
+  filterAndSortMatches,
+  paginateMatches,
+  type MatchSort,
+  type RelationshipFilter,
+} from "./lib/discovery";
 import { clearPersistentState, loadPersistentState, savePersistentState } from "./lib/storage";
 import { buildMatchesAsync, buildRecommendations, decadeTerms, getStats, topTerms } from "./lib/taste";
 import type { FilmSignal, Language, MatchResult, UserTaste } from "./types";
 
 type Tab = "overview" | "matches" | "social" | "profile";
-type MatchScope = "discover" | "following" | "all";
-type RelationshipFilter = "any" | "yes" | "no";
 
 type SocialMember = {
   id?: string;
@@ -40,7 +46,9 @@ type SocialMember = {
   displayName: string;
   avatarUrl?: string;
   connections?: number;
+  connectionWeight?: number;
   via?: string[];
+  viaDetails?: UserTaste["connectionDetails"];
 };
 
 type SocialData =
@@ -71,7 +79,15 @@ type SocialData =
       fans: SocialMember[];
       lostFollowers: SocialMember[];
       newFollowers: SocialMember[];
-      network?: { nodes: number; edges: number; capped: boolean };
+      network?: {
+        nodes: number;
+        edges: number;
+        capped: boolean;
+        connectorsScanned?: number;
+        failedConnectors?: number;
+        candidateCount?: number;
+        completedAt?: string;
+      };
     };
 
 type PersistentAppState = {
@@ -89,15 +105,21 @@ export default function App() {
   const [users, setUsers] = useState<UserTaste[]>(loadStoredUsers);
   const [activeId, setActiveId] = useState(() => localStorage.getItem("tastetwin.active") ?? "");
   const [accountHandle, setAccountHandle] = useState(() => localStorage.getItem("tastetwin.handle") ?? "");
-  const [minCommon, setMinCommon] = useState(1);
+  const [minCommon, setMinCommon] = useState(0);
   const [minSharedLoves, setMinSharedLoves] = useState(0);
-  const [maxDivergences, setMaxDivergences] = useState(25);
+  const [maxDivergences, setMaxDivergences] = useState(9999);
   const [minConfidence, setMinConfidence] = useState(0);
   const [minConnections, setMinConnections] = useState(0);
+  const [maxConnections, setMaxConnections] = useState(9999);
+  const [minNiche, setMinNiche] = useState(0);
+  const [maxNiche, setMaxNiche] = useState(100);
+  const [minActivity, setMinActivity] = useState(0);
+  const [maxActivity, setMaxActivity] = useState(100);
   const [minScore, setMinScore] = useState(0);
-  const [matchLimit, setMatchLimit] = useState(50);
-  const [networkCandidateLimit, setNetworkCandidateLimit] = useState(250);
-  const [matchScope, setMatchScope] = useState<MatchScope>("discover");
+  const [pageSize, setPageSize] = useState(50);
+  const [matchPage, setMatchPage] = useState(1);
+  const [matchSort, setMatchSort] = useState<MatchSort>("recommended");
+  const [networkCandidateLimit, setNetworkCandidateLimit] = useState(0);
   const [myFollowFilter, setMyFollowFilter] = useState<RelationshipFilter>("any");
   const [followsMeFilter, setFollowsMeFilter] = useState<RelationshipFilter>("any");
   const [matches, setMatches] = useState<MatchResult[]>([]);
@@ -109,6 +131,8 @@ export default function App() {
   const [socialByHandle, setSocialByHandle] = useState<Record<string, SocialData>>(loadStoredSocial);
   const [copied, setCopied] = useState(false);
   const [preparedExtensionPath, setPreparedExtensionPath] = useState("");
+  const [tmdbToken, setTmdbToken] = useState(() => localStorage.getItem("tastetwin.tmdbToken") ?? "");
+  const [tmdbLoading, setTmdbLoading] = useState(false);
   const [storageReady, setStorageReady] = useState(false);
 
   const uploadedUser = users.find((user) => user.source === "upload");
@@ -142,50 +166,85 @@ export default function App() {
     }
     return avatars;
   }, [currentSocial]);
-  const matchCandidates = useMemo(() => {
-    if (!activeUser) return [];
-    return users.filter((user) => {
-      if (user.id === activeUser.id) return false;
-      const followed = followingHandles.has(user.handle.toLowerCase());
-      if (matchScope === "discover") return !followed;
-      if (matchScope === "following") return followed;
-      return true;
-    });
-  }, [activeUser, followingHandles, matchScope, users]);
+  const matchCandidates = useMemo(
+    () => (activeUser ? users.filter((user) => user.id !== activeUser.id) : []),
+    [activeUser, users],
+  );
   const filteredMatches = useMemo(
     () =>
-      matches
-        .filter(
-          (match) =>
-            match.score >= minScore &&
-            match.commonCount >= minCommon &&
-            match.sharedLoves.length >= minSharedLoves &&
-            match.divergences.length <= maxDivergences &&
-            match.confidence >= minConfidence &&
-            (match.user.networkConnections ?? 0) >= minConnections &&
-            relationshipMatches(myFollowFilter, followingHandles.has(match.user.handle.toLowerCase())) &&
-            relationshipMatches(followsMeFilter, followerHandles.has(match.user.handle.toLowerCase())),
-        )
-        .slice(0, matchLimit),
+      filterAndSortMatches(
+        matches,
+        {
+          minScore,
+          minCommon,
+          minSharedLoves,
+          maxDivergences,
+          minConfidence,
+          minConnections,
+          maxConnections,
+          minNiche,
+          maxNiche,
+          minActivity,
+          maxActivity,
+          myFollow: myFollowFilter,
+          followsMe: followsMeFilter,
+        },
+        matchSort,
+        followingHandles,
+        followerHandles,
+      ),
     [
       followerHandles,
       followsMeFilter,
       followingHandles,
-      matchLimit,
+      matchSort,
       matches,
+      maxActivity,
+      maxConnections,
       maxDivergences,
+      maxNiche,
       minCommon,
+      minActivity,
       minConfidence,
       minConnections,
+      minNiche,
       minScore,
       minSharedLoves,
       myFollowFilter,
     ],
   );
+  const matchPagination = useMemo(
+    () => paginateMatches(filteredMatches, matchPage, pageSize),
+    [filteredMatches, matchPage, pageSize],
+  );
+  const topRecommended = useMemo(
+    () => [...matches].sort((a, b) => b.recommendationScore - a.recommendationScore)[0],
+    [matches],
+  );
   const recommendations = useMemo(() => (activeUser ? buildRecommendations(activeUser, matches) : []), [activeUser, matches]);
   const genreTerms = useMemo(() => (activeUser ? topTerms(activeUser, "genres") : []), [activeUser]);
   const directorTerms = useMemo(() => (activeUser ? topTerms(activeUser, "directors", 4) : []), [activeUser]);
   const decadeData = useMemo(() => (activeUser ? decadeTerms(activeUser) : []), [activeUser]);
+
+  useEffect(() => {
+    setMatchPage(1);
+  }, [
+    followsMeFilter,
+    matchSort,
+    maxConnections,
+    maxActivity,
+    maxDivergences,
+    maxNiche,
+    minCommon,
+    minActivity,
+    minConfidence,
+    minConnections,
+    minNiche,
+    minScore,
+    minSharedLoves,
+    myFollowFilter,
+    pageSize,
+  ]);
 
   useEffect(() => {
     let cancelled = false;
@@ -218,7 +277,7 @@ export default function App() {
     loadPersistentState<PersistentAppState>(PERSISTENT_STATE_KEY)
       .then((saved) => {
         if (cancelled || !saved) return;
-        if (Array.isArray(saved.users)) setUsers(saved.users);
+        if (Array.isArray(saved.users)) setUsers(saved.users.map(deriveUserActivity));
         if (typeof saved.activeId === "string") setActiveId(saved.activeId);
         if (typeof saved.accountHandle === "string") setAccountHandle(saved.accountHandle);
         if (saved.socialByHandle && typeof saved.socialByHandle === "object") setSocialByHandle(saved.socialByHandle);
@@ -287,7 +346,7 @@ export default function App() {
     if (!file) return;
     setStatus("");
     try {
-      const imported = await readLetterboxdExport(file, accountHandle);
+      const imported = deriveUserActivity(await readLetterboxdExport(file, accountHandle));
       const nextUsers = [imported, ...users.filter((user) => user.source !== "upload")];
       setUsers(nextUsers);
       setActiveId(imported.id);
@@ -381,7 +440,6 @@ export default function App() {
     const social = socialByHandle[handle];
     if (!social?.available) return;
     const followingHandles = social.following.map((member) => member.username);
-    setMatchScope("following");
     await fetchProfilesForHandles(followingHandles, social.following);
   }
 
@@ -407,16 +465,18 @@ export default function App() {
         offset = payload.nextOffset ?? total;
         setStatus(language === "tr" ? `Ag listesi aliniyor: ${handles.length}/${total}` : `Loading network list: ${handles.length}/${total}`);
       } while (offset < total && (networkCandidateLimit === 0 || handles.length < networkCandidateLimit));
-      const directFollowing = new Set(
-        socialByHandle[handle]?.available
-          ? socialByHandle[handle].following.map((member) => member.username.toLowerCase())
-          : [],
-      );
+      const directMembers = socialByHandle[handle]?.available
+        ? [...socialByHandle[handle].following, ...socialByHandle[handle].followers]
+        : [];
+      const directHandles = [...new Set(directMembers.map((member) => member.username.toLowerCase()))];
+      const directSet = new Set(directHandles);
       const discoveries = handles.filter(
-        (candidate) => candidate !== handle.toLowerCase() && !directFollowing.has(candidate.toLowerCase()),
+        (candidate) => candidate !== handle.toLowerCase() && !directSet.has(candidate.toLowerCase()),
       );
-      setMatchScope("discover");
-      await fetchProfilesForHandles(discoveries, members);
+      await fetchProfilesForHandles(
+        [...directHandles, ...discoveries],
+        [...directMembers, ...members],
+      );
     } catch (error) {
       console.error(error);
       setStatus(language === "tr" ? "Ag taramasi bulunamadi. Chrome eklentisinden ag haritasini calistir." : "Network scan not found. Run the network map in the Chrome extension.");
@@ -452,7 +512,9 @@ export default function App() {
               displayName: member?.displayName || user.displayName,
               avatarUrl: member?.avatarUrl || user.avatarUrl,
               networkConnections: member?.connections,
+              networkConnectionWeight: member?.connectionWeight,
               connectionHandles: member?.via,
+              connectionDetails: member?.viaDetails,
             };
           }),
         );
@@ -461,7 +523,7 @@ export default function App() {
       const currentUpload = users.find((user) => user.source === "upload");
       const nextUsers = [
         ...users.filter((user) => user.source !== "rss"),
-        ...fetched.filter((user) => user.id !== currentUpload?.id),
+        ...fetched.filter((user) => user.id !== currentUpload?.id).map(deriveUserActivity),
       ];
       setUsers(nextUsers);
       setActiveId(currentUpload?.id ?? fetched[0]?.id ?? "");
@@ -507,6 +569,70 @@ export default function App() {
     }
   }
 
+  async function enrichWithTmdb() {
+    if (!activeUser || !tmdbToken.trim()) return;
+    setTmdbLoading(true);
+    setStatus("");
+    try {
+      const validation = await fetch("/api/tmdb/validate", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ token: tmdbToken.trim() }),
+      });
+      const validationBody = await validation.json().catch(() => ({}));
+      if (!validation.ok) throw new Error(validationBody.error ?? "tmdb_token_invalid");
+      localStorage.setItem("tastetwin.tmdbToken", tmdbToken.trim());
+
+      const films = activeUser.films.filter((film) => film.watchlist || (film.rating ?? 0) >= 4);
+      const metadata = new Map<string, Partial<FilmSignal>>();
+      const batchSize = 25;
+      for (let offset = 0; offset < films.length; offset += batchSize) {
+        setStatus(
+          language === "tr"
+            ? `TMDB metadata aliniyor: ${Math.min(offset + batchSize, films.length)}/${films.length}`
+            : `Loading TMDB metadata: ${Math.min(offset + batchSize, films.length)}/${films.length}`,
+        );
+        const response = await fetch("/api/tmdb/enrich", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ token: tmdbToken.trim(), films: films.slice(offset, offset + batchSize) }),
+        });
+        const payload = await response.json().catch(() => ({}));
+        if (!response.ok) throw new Error(payload.error ?? "tmdb_enrich_failed");
+        for (const item of payload.results ?? []) metadata.set(item.key, item);
+        await new Promise((resolve) => window.setTimeout(resolve, 0));
+      }
+
+      setUsers((current) =>
+        current.map((user) =>
+          user.id === activeUser.id
+            ? {
+                ...user,
+                films: user.films.map((film) => {
+                  const item = metadata.get(film.key);
+                  return item ? { ...film, ...item } : film;
+                }),
+              }
+            : user,
+        ),
+      );
+      setStatus(
+        language === "tr"
+          ? `${metadata.size} filme TMDB yonetmen, anahtar kelime ve onerileri eklendi.`
+          : `Added TMDB directors, keywords and recommendations to ${metadata.size} films.`,
+      );
+    } catch (error) {
+      console.error(error);
+      setStatus(
+        language === "tr"
+          ? `TMDB islemi tamamlanamadi: ${error instanceof Error ? error.message : "bilinmeyen hata"}`
+          : `TMDB enrichment failed: ${error instanceof Error ? error.message : "unknown error"}`,
+      );
+    } finally {
+      setTmdbLoading(false);
+    }
+  }
+
   function resetFollowerHistory() {
     const handle = (accountHandle || activeUser?.handle || "").toLowerCase();
     if (!handle) return;
@@ -549,9 +675,9 @@ export default function App() {
 
   async function copyShare() {
     if (!activeUser || !stats) return;
-    const topMatch = matches[0];
+    const topMatch = topRecommended;
     const text = `${activeUser.displayName} x ${topMatch?.user.displayName ?? "?"}: ${
-      topMatch?.score ?? 0
+      topMatch?.recommendationScore ?? 0
     } TasteTwin score. ${stats.loved
       .slice(0, 3)
       .map((film) => film.title)
@@ -646,6 +772,32 @@ export default function App() {
           </ol>
         </details>
 
+        <details className="tmdb-settings">
+          <summary>
+            <KeyRound size={16} />
+            <span>TMDB film zekasi</span>
+          </summary>
+          <p>
+            {language === "tr"
+              ? "Ucretsiz TMDB API Read Access Token'ini gir. Ortak sevilenlerden watchlist onerisi icin anahtar kelime, yonetmen ve TMDB onerileri kullanilir."
+              : "Enter a free TMDB API Read Access Token. Keywords, directors and TMDB recommendations improve watchlist picks."}
+          </p>
+          <input
+            type="password"
+            value={tmdbToken}
+            placeholder="eyJhbGci..."
+            onChange={(event) => setTmdbToken(event.target.value)}
+          />
+          <button className="primary-button" onClick={enrichWithTmdb} disabled={!activeUser || !tmdbToken.trim() || tmdbLoading}>
+            {tmdbLoading ? <Loader2 className="spin" size={17} /> : <Sparkles size={17} />}
+            <span>{language === "tr" ? "Dogrula ve metadata ekle" : "Validate and enrich"}</span>
+          </button>
+          <a href="https://www.themoviedb.org/settings/api" target="_blank" rel="noreferrer">
+            {language === "tr" ? "TMDB token alma sayfasi" : "Get a TMDB token"}
+          </a>
+          <small>This product uses the TMDB API but is not endorsed or certified by TMDB.</small>
+        </details>
+
         <label className="upload-button" title={t(language, "import")}>
           <FileUp size={18} />
           <span>{language === "tr" ? "Tam film arsivi ZIP" : "Full film archive ZIP"}</span>
@@ -722,8 +874,8 @@ export default function App() {
               </div>
               <div className="score-chip">
                 <Star size={18} />
-                <strong>{matches[0]?.score ?? 0}</strong>
-                <span>{t(language, "matchScore")}</span>
+                <strong>{topRecommended?.recommendationScore ?? 0}</strong>
+                <span>{language === "tr" ? "oneri" : "recommended"}</span>
               </div>
             </header>
 
@@ -741,17 +893,9 @@ export default function App() {
             {tab === "matches" && (
               <section className="view-stack">
                 <div className="filter-band">
-                  <Filter size={18} />
-                  <div className="scope-control" aria-label={language === "tr" ? "Aday havuzu" : "Candidate pool"}>
-                    <button className={matchScope === "discover" ? "active" : ""} onClick={() => setMatchScope("discover")}>
-                      {language === "tr" ? "Takip etmediklerim" : "Not followed"}
-                    </button>
-                    <button className={matchScope === "following" ? "active" : ""} onClick={() => setMatchScope("following")}>
-                      {language === "tr" ? "Takip ettiklerim" : "Following"}
-                    </button>
-                    <button className={matchScope === "all" ? "active" : ""} onClick={() => setMatchScope("all")}>
-                      {language === "tr" ? "Tumu" : "All"}
-                    </button>
+                  <div className="filter-heading">
+                    <Filter size={18} />
+                    <strong>{language === "tr" ? "Kesif filtreleri" : "Discovery filters"}</strong>
                   </div>
                   <label>
                     {language === "tr" ? "Ben takip ediyorum" : "I follow"}
@@ -769,84 +913,60 @@ export default function App() {
                       <option value="no">{language === "tr" ? "Hayir" : "No"}</option>
                     </select>
                   </label>
+                  <NumberFilter label={language === "tr" ? "Min ortak puanli" : "Min co-rated"} value={minCommon} min={0} max={9999} onChange={setMinCommon} />
+                  <NumberFilter label={language === "tr" ? "Min ortak sevilen" : "Min shared loves"} value={minSharedLoves} min={0} max={9999} onChange={setMinSharedLoves} />
+                  <NumberFilter label={language === "tr" ? "Maks ayrisma" : "Max splits"} value={maxDivergences} min={0} max={9999} onChange={setMaxDivergences} />
+                  <NumberFilter label={language === "tr" ? "Min gecerlilik" : "Min validity"} value={minConfidence} min={0} max={100} suffix="%" onChange={setMinConfidence} />
+                  <NumberFilter label={language === "tr" ? "Min ortak baglanti" : "Min mutual links"} value={minConnections} min={0} max={9999} onChange={setMinConnections} />
+                  <NumberFilter label={language === "tr" ? "Maks ortak baglanti" : "Max mutual links"} value={maxConnections} min={0} max={9999} onChange={setMaxConnections} />
+                  <NumberFilter label={language === "tr" ? "Min nislik" : "Min niche"} value={minNiche} min={0} max={100} onChange={setMinNiche} />
+                  <NumberFilter label={language === "tr" ? "Maks nislik" : "Max niche"} value={maxNiche} min={0} max={100} onChange={setMaxNiche} />
+                  <NumberFilter label={language === "tr" ? "Min aktiflik" : "Min activity"} value={minActivity} min={0} max={100} onChange={setMinActivity} />
+                  <NumberFilter label={language === "tr" ? "Maks aktiflik" : "Max activity"} value={maxActivity} min={0} max={100} onChange={setMaxActivity} />
+                  <NumberFilter label={language === "tr" ? "En az zevk skoru" : "Minimum taste score"} value={minScore} min={0} max={99} onChange={setMinScore} />
                   <label>
-                    {language === "tr" ? "Min ortak puanli" : "Min co-rated"}
-                    <input
-                      type="range"
-                      min="0"
-                      max="25"
-                      value={minCommon}
-                      onChange={(event) => setMinCommon(Number(event.target.value))}
-                    />
-                    <strong>{minCommon}</strong>
+                    {language === "tr" ? "Sirala" : "Sort"}
+                    <select value={matchSort} onChange={(event) => setMatchSort(event.target.value as MatchSort)}>
+                      <option value="recommended">{language === "tr" ? "Onerilen" : "Recommended"}</option>
+                      <option value="taste">{language === "tr" ? "Zevk skoru" : "Taste score"}</option>
+                      <option value="niche">{language === "tr" ? "Nislik" : "Niche"}</option>
+                      <option value="connections">{language === "tr" ? "Baglanti kalitesi" : "Connection quality"}</option>
+                      <option value="activity">{language === "tr" ? "Aktiflik" : "Activity"}</option>
+                      <option value="evidence">{language === "tr" ? "Ortak film" : "Co-rated films"}</option>
+                      <option value="validity">{language === "tr" ? "Gecerlilik" : "Validity"}</option>
+                    </select>
                   </label>
                   <label>
-                    {language === "tr" ? "Min ortak sevilen" : "Min shared loves"}
-                    <input
-                      type="range"
-                      min="0"
-                      max="10"
-                      value={minSharedLoves}
-                      onChange={(event) => setMinSharedLoves(Number(event.target.value))}
-                    />
-                    <strong>{minSharedLoves}</strong>
-                  </label>
-                  <label>
-                    {language === "tr" ? "Maks ayrisma" : "Max splits"}
-                    <input
-                      type="range"
-                      min="0"
-                      max="25"
-                      value={maxDivergences}
-                      onChange={(event) => setMaxDivergences(Number(event.target.value))}
-                    />
-                    <strong>{maxDivergences}</strong>
-                  </label>
-                  <label>
-                    {language === "tr" ? "Min gecerlilik" : "Min validity"}
-                    <input
-                      type="range"
-                      min="0"
-                      max="100"
-                      step="5"
-                      value={minConfidence}
-                      onChange={(event) => setMinConfidence(Number(event.target.value))}
-                    />
-                    <strong>%{minConfidence}</strong>
-                  </label>
-                  <label>
-                    {language === "tr" ? "Min ortak baglanti" : "Min mutual links"}
-                    <input
-                      type="range"
-                      min="0"
-                      max="10"
-                      value={minConnections}
-                      onChange={(event) => setMinConnections(Number(event.target.value))}
-                    />
-                    <strong>{minConnections}</strong>
-                  </label>
-                  <label>
-                    {language === "tr" ? "En az skor" : "Minimum score"}
-                    <input
-                      type="range"
-                      min="0"
-                      max="95"
-                      step="5"
-                      value={minScore}
-                      onChange={(event) => setMinScore(Number(event.target.value))}
-                    />
-                    <strong>{minScore}</strong>
-                  </label>
-                  <label>
-                    {language === "tr" ? "Sonuc" : "Results"}
-                    <select value={matchLimit} onChange={(event) => setMatchLimit(Number(event.target.value))}>
-                      {[20, 50, 100, 250].map((limit) => (
-                        <option value={limit} key={limit}>
-                          {limit}
+                    {language === "tr" ? "Sayfa boyutu" : "Page size"}
+                    <select value={pageSize} onChange={(event) => setPageSize(Number(event.target.value))}>
+                      {[25, 50, 100, 250].map((size) => (
+                        <option value={size} key={size}>
+                          {size}
                         </option>
                       ))}
                     </select>
                   </label>
+                  <button
+                    className="reset-filter-button"
+                    onClick={() => {
+                      setMyFollowFilter("any");
+                      setFollowsMeFilter("any");
+                      setMinCommon(0);
+                      setMinSharedLoves(0);
+                      setMaxDivergences(9999);
+                      setMinConfidence(0);
+                      setMinConnections(0);
+                      setMaxConnections(9999);
+                      setMinNiche(0);
+                      setMaxNiche(100);
+                      setMinActivity(0);
+                      setMaxActivity(100);
+                      setMinScore(0);
+                    }}
+                  >
+                    <RefreshCcw size={16} />
+                    {language === "tr" ? "Filtreleri sifirla" : "Reset filters"}
+                  </button>
                 </div>
 
                 <details className="score-guide">
@@ -864,16 +984,21 @@ export default function App() {
                       ? "Cok sayida ayrisma ek ceza getirir. Yerel agda az puanlanan veya gorusleri bolen filmler en fazla %50 daha agir sinyal olabilir. Gecerlilik ortak puanli film sayisina gore artar; az veri varsa ham puan 50'ye yaklastirilir."
                       : "Many splits add an extra penalty. Films that are rare or divisive in the loaded network can carry up to 50% more weight. Validity rises with co-rated evidence; sparse evidence pulls the raw score toward 50."}
                   </p>
+                  <p>
+                    {language === "tr"
+                      ? "Onerilen puan: zevk %70, kanit gecerliligi %8, ortak baglanti kalitesi %11, nislik %6 ve son film aktifligi %5. Baglanti kalitesinde cok genis bir cevreyi takip eden baglayicilar daha dusuk agirlik alir."
+                      : "Recommendation score: 70% taste, 8% evidence validity, 11% connection quality, 6% niche and 5% recent film activity. Connectors following a very broad set of accounts receive less weight."}
+                  </p>
                 </details>
 
                 <p className="match-summary">
                   {matchProgress ||
                     (language === "tr"
-                      ? `${matchCandidates.length} adaydan ${filteredMatches.length} eslesme gosteriliyor. Kartin ustune tiklayarak puanli ortak filmleri ac.`
-                      : `Showing ${filteredMatches.length} matches from ${matchCandidates.length} candidates. Select a card for rated film evidence.`)}
+                      ? `${matchCandidates.length} aday hesaplandi; ${filteredMatches.length} filtreye uyuyor. ${matchPagination.start + (filteredMatches.length ? 1 : 0)}-${matchPagination.end} arasi gosteriliyor.`
+                      : `${matchCandidates.length} candidates calculated; ${filteredMatches.length} match the filters. Showing ${matchPagination.start + (filteredMatches.length ? 1 : 0)}-${matchPagination.end}.`)}
                 </p>
                 <div className="match-list">
-                  {filteredMatches.map((match) => (
+                  {matchPagination.items.map((match) => (
                     <MatchCard
                       key={match.user.id}
                       language={language}
@@ -884,6 +1009,22 @@ export default function App() {
                   ))}
                   {!filteredMatches.length && <p className="empty-state">{t(language, "emptyMatches")}</p>}
                 </div>
+                {filteredMatches.length > 0 && (
+                  <nav className="match-pagination" aria-label={language === "tr" ? "Eslesme sayfalari" : "Match pages"}>
+                    <button disabled={matchPagination.page <= 1} onClick={() => setMatchPage((page) => Math.max(1, page - 1))}>
+                      {language === "tr" ? "Onceki" : "Previous"}
+                    </button>
+                    <span>
+                      {language === "tr" ? "Sayfa" : "Page"} {matchPagination.page} / {matchPagination.totalPages}
+                    </span>
+                    <button
+                      disabled={matchPagination.page >= matchPagination.totalPages}
+                      onClick={() => setMatchPage((page) => Math.min(matchPagination.totalPages, page + 1))}
+                    >
+                      {language === "tr" ? "Sonraki" : "Next"}
+                    </button>
+                  </nav>
+                )}
               </section>
             )}
 
@@ -920,8 +1061,8 @@ export default function App() {
                   <p>{t(language, "shareCard")}</p>
                   <h2>{activeUser.displayName}</h2>
                   <div className="share-score">
-                    <strong>{matches[0]?.score ?? 0}</strong>
-                    <span>{matches[0]?.user.displayName ?? "TasteTwin"}</span>
+                    <strong>{topRecommended?.recommendationScore ?? 0}</strong>
+                    <span>{topRecommended?.user.displayName ?? "TasteTwin"}</span>
                   </div>
                   <div className="tag-cloud">
                     {[...decadeData.slice(0, 3), ...genreTerms.slice(0, 2)].map(([term]) => (
@@ -1079,9 +1220,15 @@ function SocialPanel({
             <h2>{language === "tr" ? "Iki halkali ag" : "Two-hop network"}</h2>
             <p className="muted-line">
               {language === "tr"
-              ? `${data.network.nodes} hesap, ${data.network.edges} bag bulundu${data.network.capped ? "; 10.000 dugume ulasti" : ""}. Zaten takip ettiklerin cikarilir; ortak bag sayisi yuksek kesif adaylari once denenir.`
-              : `${data.network.nodes} accounts and ${data.network.edges} edges found${data.network.capped ? "; reached 10,000 nodes" : ""}. Existing follows are excluded and highly connected discoveries are tried first.`}
+              ? `${data.network.nodes} hesap, ${data.network.edges} bag ve ${data.network.candidateCount ?? "?"} yeni aday kaydedildi${data.network.capped ? "; 10.000 dugume ulasti" : ""}. ${data.network.connectorsScanned ?? "?"} baglayici tarandi. Takip ettigin ve seni takip eden hesaplar agda tohumdur; onerilen adaylar bu dogrudan listelerin disindadir.`
+              : `${data.network.nodes} accounts, ${data.network.edges} edges and ${data.network.candidateCount ?? "?"} new candidates saved${data.network.capped ? "; reached 10,000 nodes" : ""}. ${data.network.connectorsScanned ?? "?"} connectors scanned. Your following and followers seed the graph; suggested candidates exclude those direct lists.`}
             </p>
+            {data.network.completedAt && (
+              <strong>
+                {language === "tr" ? "Ag taramasi kaydi" : "Network scan record"}:{" "}
+                {new Date(data.network.completedAt).toLocaleString(language === "tr" ? "tr-TR" : "en-US")}
+              </strong>
+            )}
           </div>
           <div className="network-match-controls">
             <label>
@@ -1384,14 +1531,19 @@ function MatchCard({
           <div>
             <h2>{match.user.displayName}</h2>
             <span>@{match.user.handle}</span>
+            <small className="activity-line">
+              {formatActivity(match.user, language)}
+            </small>
           </div>
         </div>
-        <div className="radial-score" style={{ "--score": `${match.score}%` } as React.CSSProperties}>
-          <strong>{match.score}</strong>
+        <div className="radial-score" style={{ "--score": `${match.recommendationScore}%` } as React.CSSProperties}>
+          <strong>{match.recommendationScore}</strong>
+          <small>{language === "tr" ? "oneri" : "rec."}</small>
         </div>
       </div>
 
       <div className="match-metrics">
+        <Metric label={language === "tr" ? "zevk skoru" : "taste score"} value={match.score} />
         <Metric label={language === "tr" ? "ortak puanli film" : "co-rated films"} value={match.commonCount} />
         <Metric label={t(language, "sharedLoves")} value={match.sharedLoves.length} />
         <Metric label={t(language, "sharedDislikes")} value={match.sharedDislikes.length} />
@@ -1401,12 +1553,13 @@ function MatchCard({
           value={match.user.networkConnections ?? 0}
         />
         <Metric label={language === "tr" ? "nislik" : "niche"} value={match.nicheScore} />
+        <Metric label={language === "tr" ? "aktiflik" : "activity"} value={match.user.activityScore ?? 0} />
       </div>
 
       <p className="coverage-line">
         {language === "tr"
-          ? `Adayin RSS akisinda ${match.candidateFilmCount} puanli film var; ${match.commonCount} filme ikiniz de puan vermissiniz. Skor ${match.score}, ham uyum ${match.rawScore}; ${confidenceLabel} (%${match.confidence}).`
-          : `The candidate has ${match.candidateFilmCount} rated RSS films; you both rated ${match.commonCount}. Score ${match.score}, raw affinity ${match.rawScore}; ${confidenceLabel} (${match.confidence}%).`}
+          ? `Oneri ${match.recommendationScore}; zevk ${match.score}. Adayin RSS akisinda ${match.candidateFilmCount} puanli film var; ${match.commonCount} filme ikiniz de puan vermissiniz. Ham uyum ${match.rawScore}; ${confidenceLabel} (%${match.confidence}).`
+          : `Recommendation ${match.recommendationScore}; taste ${match.score}. The candidate has ${match.candidateFilmCount} rated RSS films; you both rated ${match.commonCount}. Raw affinity ${match.rawScore}; ${confidenceLabel} (${match.confidence}%).`}
       </p>
 
       <div className="reason-list">
@@ -1426,12 +1579,12 @@ function MatchCard({
                   ? " Film ikinizin de watchlistinde. Bu bilgi ancak iki tarafta da watchlist verisi varsa bulunabilir."
                   : match.togetherPick.kind === "your-watchlist-they-loved"
                     ? ` Film senin watchlistinde; ${match.user.displayName} filme en az 4 vermis.`
-                    : ` Film senin watchlistinde ve ortak sevdiginiz filmlerin yonetmen, tur ve ulke sinyallerine benziyor. Uyum: %${match.togetherPick.fitScore ?? 0}.`
+                    : ` Film senin watchlistinde; ortak sevdiginiz filmlerin TMDB onerisi, anahtar kelime, yonetmen ve daha dusuk agirlikli tur sinyalleriyle eslesti. Uyum: %${match.togetherPick.fitScore ?? 0}.`
                 : match.togetherPick.kind === "mutual-watchlist"
                   ? " The film is on both watchlists. This requires watchlist data from both people."
                   : match.togetherPick.kind === "your-watchlist-they-loved"
                     ? ` The film is on your watchlist and ${match.user.displayName} rated it at least 4.`
-                    : ` The film is on your watchlist and resembles your shared loves by director, genre and country. Fit: ${match.togetherPick.fitScore ?? 0}%.`}
+                    : ` The film is on your watchlist and matches shared-loved TMDB recommendations, keywords, directors and lower-weight genre signals. Fit: ${match.togetherPick.fitScore ?? 0}%.`}
             </small>
           </span>
           <strong>
@@ -1469,7 +1622,8 @@ function MatchDetail({
             <Avatar name={match.user.displayName} src={avatarUrl} large />
             <div>
               <h2>{match.user.displayName}</h2>
-              <span>@{match.user.handle} · {match.score}/100</span>
+              <span>@{match.user.handle} · {language === "tr" ? "oneri" : "recommended"} {match.recommendationScore}/100 · {language === "tr" ? "zevk" : "taste"} {match.score}/100</span>
+              <small className="activity-line">{formatActivity(match.user, language)}</small>
             </div>
           </div>
           <div className="dialog-actions">
@@ -1550,9 +1704,32 @@ function MatchDetail({
                 : "These are accounts you follow that also follow this candidate."}
             </p>
             <div className="connection-list">
-              {match.user.connectionHandles?.map((handle) => (
-                <a href={`https://letterboxd.com/${handle}/`} target="_blank" rel="noreferrer" key={handle}>
-                  @{handle}
+              {(match.user.connectionDetails?.length
+                ? match.user.connectionDetails
+                : match.user.connectionHandles?.map((handle) => ({
+                    handle,
+                    displayName: handle,
+                    avatarUrl: undefined,
+                    followingCount: undefined,
+                    weight: 0,
+                  })) ?? []
+              ).map((connection) => (
+                <a
+                  href={`https://letterboxd.com/${connection.handle}/`}
+                  target="_blank"
+                  rel="noreferrer"
+                  key={connection.handle}
+                  title={
+                    connection.followingCount !== undefined
+                      ? `${connection.followingCount} following · ${connection.weight.toFixed(3)} weight`
+                      : undefined
+                  }
+                >
+                  <Avatar name={connection.displayName} src={connection.avatarUrl} />
+                  <span>
+                    <strong>{connection.displayName}</strong>
+                    <small>@{connection.handle}</small>
+                  </span>
                 </a>
               ))}
             </div>
@@ -1575,8 +1752,30 @@ function formatRating(rating?: number) {
   return rating === undefined ? "—" : `${rating.toFixed(rating % 1 ? 1 : 0)} ★`;
 }
 
-function relationshipMatches(filter: RelationshipFilter, value: boolean) {
-  return filter === "any" || (filter === "yes" ? value : !value);
+function formatActivity(user: UserTaste, language: Language) {
+  if (!user.lastActivityAt) {
+    return language === "tr" ? "Son film etkinligi bilinmiyor" : "Last film activity unknown";
+  }
+  const days = Math.max(0, Math.floor((Date.now() - Date.parse(user.lastActivityAt)) / (24 * 60 * 60 * 1000)));
+  const relative =
+    language === "tr"
+      ? days === 0
+        ? "bugun"
+        : days === 1
+          ? "1 gun once"
+          : days < 60
+            ? `${days} gun once`
+            : `${Math.floor(days / 30)} ay once`
+      : days === 0
+        ? "today"
+        : days === 1
+          ? "1 day ago"
+          : days < 60
+            ? `${days} days ago`
+            : `${Math.floor(days / 30)} months ago`;
+  return language === "tr"
+    ? `Son film etkinligi ${relative} · 30 gunde ${user.activity30Days ?? 0}`
+    : `Last film activity ${relative} · ${user.activity30Days ?? 0} in 30 days`;
 }
 
 function Metric({ label, value }: { label: string; value: number }) {
@@ -1586,6 +1785,43 @@ function Metric({ label, value }: { label: string; value: number }) {
       <span>{label}</span>
     </div>
   );
+}
+
+function NumberFilter({
+  label,
+  value,
+  min,
+  max,
+  suffix,
+  onChange,
+}: {
+  label: string;
+  value: number;
+  min: number;
+  max: number;
+  suffix?: string;
+  onChange: (value: number) => void;
+}) {
+  return (
+    <label className="number-filter">
+      <span>{label}</span>
+      <div>
+        <input
+          type="number"
+          min={min}
+          max={max}
+          value={value}
+          onChange={(event) => onChange(clampNumber(Number(event.target.value), min, max))}
+        />
+        {suffix && <small>{suffix}</small>}
+      </div>
+    </label>
+  );
+}
+
+function clampNumber(value: number, min: number, max: number) {
+  if (!Number.isFinite(value)) return min;
+  return Math.min(max, Math.max(min, Math.round(value)));
 }
 
 function FilmList({ films }: { films: Array<{ key: string; title: string; year?: number; rating?: number }> }) {
@@ -1751,10 +1987,34 @@ function addFollowerChanges(handle: string, payload: AvailableSocialData): Avail
 function loadStoredUsers(): UserTaste[] {
   try {
     const value = JSON.parse(localStorage.getItem("tastetwin.users") ?? "[]");
-    return Array.isArray(value) ? value : [];
+    return Array.isArray(value) ? value.map(deriveUserActivity) : [];
   } catch {
     return [];
   }
+}
+
+function deriveUserActivity(user: UserTaste): UserTaste {
+  if (user.lastActivityAt && user.activityScore !== undefined) return user;
+  const dates = user.films
+    .flatMap((film) => [film.activityDate, ...film.watchedDates])
+    .map((value) => Date.parse(value ?? ""))
+    .filter(Number.isFinite)
+    .sort((a, b) => b - a);
+  if (!dates.length) return { ...user, activity30Days: 0, activity90Days: 0, activityScore: 0 };
+  const now = Date.now();
+  const day = 24 * 60 * 60 * 1000;
+  const activity30Days = dates.filter((date) => now - date <= 30 * day).length;
+  const activity90Days = dates.filter((date) => now - date <= 90 * day).length;
+  const recencyDays = Math.max(0, (now - dates[0]) / day);
+  const recencyScore = Math.max(0, 100 - recencyDays * 2);
+  const frequencyScore = Math.min(100, activity30Days * 12 + activity90Days * 3);
+  return {
+    ...user,
+    lastActivityAt: new Date(dates[0]).toISOString(),
+    activity30Days,
+    activity90Days,
+    activityScore: Math.round(recencyScore * 0.65 + frequencyScore * 0.35),
+  };
 }
 
 function loadStoredSocial(): Record<string, SocialData> {

@@ -16,6 +16,9 @@ export type FilmSignal = {
   countries: string[];
   posterUrl?: string;
   tmdbId?: string;
+  keywords?: string[];
+  tmdbRecommendations?: string[];
+  activityDate?: string;
 };
 
 export type UserTaste = {
@@ -24,7 +27,19 @@ export type UserTaste = {
   displayName: string;
   avatarUrl?: string;
   networkConnections?: number;
+  networkConnectionWeight?: number;
   connectionHandles?: string[];
+  connectionDetails?: Array<{
+    handle: string;
+    displayName: string;
+    avatarUrl?: string;
+    followingCount?: number;
+    weight: number;
+  }>;
+  lastActivityAt?: string;
+  activity30Days?: number;
+  activity90Days?: number;
+  activityScore?: number;
   importedAt: string;
   source: "rss" | "upload";
   films: FilmSignal[];
@@ -32,6 +47,7 @@ export type UserTaste = {
 
 export type MatchResult = {
   user: UserTaste;
+  recommendationScore: number;
   score: number;
   rawScore: number;
   confidence: number;

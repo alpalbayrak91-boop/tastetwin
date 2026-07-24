@@ -14,9 +14,20 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   if (message?.type !== "saveBridge") return;
 
   sendToTasteTwin(message.payload)
-    .then(async (response) => {
+    .then(async () => {
+      const { scanHistory = [] } = await chrome.storage.local.get("scanHistory");
+      const historyEntry = {
+        stage: message.stage ?? (message.payload.network ? "network-complete" : "social-complete"),
+        handle: message.payload.handle,
+        capturedAt: message.payload.capturedAt ?? new Date().toISOString(),
+        following: message.payload.following?.length ?? 0,
+        followers: message.payload.followers?.length ?? 0,
+        networkNodes: message.payload.network?.nodes ?? 0,
+        networkCandidates: message.payload.network?.candidateCount ?? message.payload.network?.candidates?.length ?? 0,
+      };
       return chrome.storage.local.set({
         lastScan: { ...message.payload, savedAt: message.payload.capturedAt ?? new Date().toISOString() },
+        scanHistory: [historyEntry, ...scanHistory].slice(0, 20),
       });
     })
     .then(() => sendResponse({ ok: true }))
@@ -47,7 +58,7 @@ async function beginScan(handle, mode) {
   await chrome.storage.local.set({
     scanStatus: {
       state: "starting",
-      text: mode === "network" ? "Ag taramasi baslatiliyor" : "Sosyal tarama baslatiliyor",
+      text: mode === "social" ? "Sosyal tarama baslatiliyor" : "Sosyal ve ag taramasi baslatiliyor",
       handle,
       updatedAt: new Date().toISOString(),
     },

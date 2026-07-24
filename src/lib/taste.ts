@@ -175,9 +175,24 @@ function scoreUser(
 
   const togetherPick = pickWatchlistFilm(target, candidate, commonFilms);
   const nicheScore = calculateNicheScore(candidate, community);
+  const networkSignal = Math.round(
+    clamp(Math.log2(1 + (candidate.networkConnectionWeight ?? candidate.networkConnections ?? 0)) * 30, 0, 100),
+  );
+  const recommendationScore = Math.round(
+    clamp(
+      score * 0.7 +
+        confidence * 0.08 +
+        networkSignal * 0.11 +
+        nicheScore * 0.06 +
+        (candidate.activityScore ?? 0) * 0.05,
+      0,
+      99,
+    ),
+  );
 
   return {
     user: candidate,
+    recommendationScore,
     score,
     rawScore,
     confidence,
@@ -278,17 +293,32 @@ function pickTasteFitWatchlist(
       const directorOverlap = overlapRatio(film.directors, seeds.flatMap((seed) => seed.directors));
       const genreOverlap = overlapRatio(film.genres, seeds.flatMap((seed) => seed.genres));
       const countryOverlap = overlapRatio(film.countries, seeds.flatMap((seed) => seed.countries));
-      const fitScore = Math.round((directorOverlap * 0.5 + genreOverlap * 0.35 + countryOverlap * 0.15) * 100);
-      return { film, fitScore, directorOverlap, genreOverlap };
+      const keywordOverlap = overlapRatio(film.keywords ?? [], seeds.flatMap((seed) => seed.keywords ?? []));
+      const recommendedBySeed =
+        film.tmdbId !== undefined &&
+        seeds.some((seed) => seed.tmdbRecommendations?.includes(String(film.tmdbId)));
+      const fitScore = Math.round(
+        (Number(recommendedBySeed) * 0.45 +
+          keywordOverlap * 0.25 +
+          directorOverlap * 0.18 +
+          genreOverlap * 0.08 +
+          countryOverlap * 0.04) *
+          100,
+      );
+      return { film, fitScore, directorOverlap, genreOverlap, keywordOverlap, recommendedBySeed };
     })
     .filter((item) => item.fitScore > 0)
     .sort((a, b) => b.fitScore - a.fitScore)[0];
   if (!ranked) return undefined;
-  const reason = ranked.directorOverlap > 0
-    ? "Shared-loved films have a director overlap."
-    : ranked.genreOverlap > 0
-      ? "Shared-loved films have a genre overlap."
-      : "Shared-loved films have a country overlap.";
+  const reason = ranked.recommendedBySeed
+    ? "TMDB recommends it from a shared-loved film."
+    : ranked.keywordOverlap > 0
+      ? "It shares specific TMDB keywords with shared-loved films."
+      : ranked.directorOverlap > 0
+        ? "Shared-loved films have a director overlap."
+        : ranked.genreOverlap > 0
+          ? "Shared-loved films have a genre overlap."
+          : "Shared-loved films have a country overlap.";
   return { film: ranked.film, kind: "taste-fit-watchlist", fitScore: ranked.fitScore, reason };
 }
 

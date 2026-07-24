@@ -4,10 +4,8 @@ const RETRY_DELAYS_MS = [5000, 12000, 25000];
 
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   if (message?.type !== "scanTasteTwin") return;
-  runScan(message.mode === "network" ? "network" : "social")
-    .then(async (payload) => ({ payload, result: await chrome.runtime.sendMessage({ type: "saveBridge", payload }) }))
-    .then(({ payload, result }) => {
-      if (!result?.ok) throw new Error(result?.error ?? "Could not send scan to TasteTwin");
+  runScan(message.mode === "social" ? "social" : "full")
+    .then((payload) => {
       notify({ state: "complete", payload });
       sendResponse({ ok: true, payload });
     })
@@ -30,44 +28,78 @@ async function runScan(mode) {
   notify({ state: "social", text: "Followers taraniyor", current: 0 });
   const followers = await scanList(handle, "followers", (progress) => notify({ state: "social", ...progress }));
   const payload = { handle, following, followers, capturedAt: new Date().toISOString() };
+  await saveStage(payload, "social-complete", "Takip verisi TasteTwin'e kaydedildi; ag taramasi devam ediyor");
 
-  if (mode === "network") {
-    payload.network = await scanTwoHopNetwork(handle, following);
+  if (mode === "full") {
+    payload.network = await scanTwoHopNetwork(handle, following, followers);
+    payload.capturedAt = new Date().toISOString();
+    await saveStage(payload, "network-complete", `Ag kaydedildi: ${payload.network.nodes} hesap`);
   }
   return payload;
 }
 
-async function scanTwoHopNetwork(owner, directFollowing) {
-  const nodes = new Set([owner, ...directFollowing.map((member) => member.username)]);
-  const directHandles = new Set([owner, ...directFollowing.map((member) => member.username)]);
-  const candidates = new Map();
-  let edges = directFollowing.length;
-  let capped = false;
+async function saveStage(payload, state, text) {
+  const result = await chrome.runtime.sendMessage({ type: "saveBridge", payload, stage: state });
+  if (!result?.ok) throw new Error(result?.error ?? "Could not send scan to TasteTwin");
+  notify({ state, text, payload });
+}
 
-  for (let index = 0; index < directFollowing.length; index += 1) {
+async function scanTwoHopNetwork(owner, directFollowing, directFollowers) {
+  const directMembers = uniqueMembers([...directFollowing, ...directFollowers]);
+  const nodes = new Set([owner, ...directMembers.map((member) => member.username)]);
+  const directHandles = new Set(nodes);
+  const candidates = new Map();
+  const daySeed = new Date().toISOString().slice(0, 10);
+  const connectors = seededShuffle(directMembers, `${owner}-${daySeed}`);
+  let edges = directMembers.length;
+  let capped = false;
+  let failedConnectors = 0;
+  let connectorsScanned = 0;
+
+  for (let index = 0; index < connectors.length; index += 1) {
     if (nodes.size >= MAX_NETWORK_NODES) {
       capped = true;
       break;
     }
-    const member = directFollowing[index];
+    const member = connectors[index];
     notify({
       state: "network",
       text: `Ag taraniyor: ${member.username}`,
       current: index + 1,
-      total: directFollowing.length,
+      total: connectors.length,
       nodes: nodes.size,
     });
     const remaining = MAX_NETWORK_NODES - nodes.size;
-    const theirs = await scanList(member.username, "following", undefined, remaining);
+    let theirs;
+    try {
+      theirs = await scanList(member.username, "following", undefined, remaining);
+    } catch {
+      failedConnectors += 1;
+      continue;
+    }
+    connectorsScanned += 1;
     edges += theirs.length;
+    const connectorWeight = Number((1 / Math.log2(Math.max(3, theirs.length + 2))).toFixed(3));
     for (const next of theirs) {
       nodes.add(next.username);
       if (directHandles.has(next.username)) continue;
       const current = candidates.get(next.username);
+      const viaDetails = [
+        ...(current?.viaDetails ?? []),
+        {
+          username: member.username,
+          displayName: member.displayName,
+          avatarUrl: member.avatarUrl,
+          followingCount: theirs.length,
+          weight: connectorWeight,
+        },
+      ];
       candidates.set(next.username, {
         ...next,
         connections: (current?.connections ?? 0) + 1,
+        connectionWeight: Number(((current?.connectionWeight ?? 0) + connectorWeight).toFixed(3)),
         via: [...new Set([...(current?.via ?? []), member.username])],
+        viaDetails,
         avatarUrl: current?.avatarUrl || next.avatarUrl,
         displayName: current?.displayName || next.displayName,
       });
@@ -81,9 +113,32 @@ async function scanTwoHopNetwork(owner, directFollowing) {
     nodes: nodes.size,
     edges,
     capped,
+    connectorsScanned,
+    failedConnectors,
+    completedAt: new Date().toISOString(),
+    candidateCount: rankedCandidates.length,
     handles: rankedCandidates.map((candidate) => candidate.username),
     candidates: rankedCandidates,
   };
+}
+
+function uniqueMembers(members) {
+  return [...new Map(members.map((member) => [member.username, member])).values()];
+}
+
+function seededShuffle(values, seed) {
+  return [...values].sort(
+    (a, b) => stableHash(`${seed}-${a.username}`) - stableHash(`${seed}-${b.username}`),
+  );
+}
+
+function stableHash(value) {
+  let hash = 2166136261;
+  for (let index = 0; index < value.length; index += 1) {
+    hash ^= value.charCodeAt(index);
+    hash = Math.imul(hash, 16777619);
+  }
+  return hash >>> 0;
 }
 
 async function scanList(handle, relationship, onProgress, maxMembers = Number.POSITIVE_INFINITY) {
