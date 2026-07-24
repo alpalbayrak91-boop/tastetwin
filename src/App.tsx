@@ -4,6 +4,8 @@ import {
   ArrowRight,
   Clapperboard,
   Copy,
+  Clock3,
+  Dices,
   Download,
   ExternalLink,
   FileUp,
@@ -46,6 +48,18 @@ import {
   type SocialMemberRecord,
 } from "./lib/social-directory";
 import { clearPersistentState, loadPersistentState, savePersistentState } from "./lib/storage";
+import {
+  buildFilmInsights,
+  buildWatchlistRanking,
+  formatRuntime,
+  pickNextWatch,
+  type NextWatchMode,
+} from "./lib/film-insights";
+import {
+  buildSocialActionCandidates,
+  type SocialAction,
+  type SocialActionRule,
+} from "./lib/social-actions";
 import { buildMatchesAsync, buildRecommendations, decadeTerms, getStats, topTerms } from "./lib/taste";
 import type { FilmSignal, Language, MatchResult, UserTaste } from "./types";
 
@@ -281,6 +295,14 @@ export default function App() {
   const genreTerms = useMemo(() => (activeUser ? topTerms(activeUser, "genres") : []), [activeUser]);
   const directorTerms = useMemo(() => (activeUser ? topTerms(activeUser, "directors", 4) : []), [activeUser]);
   const decadeData = useMemo(() => (activeUser ? decadeTerms(activeUser) : []), [activeUser]);
+  const filmInsights = useMemo(
+    () => (activeUser ? buildFilmInsights(activeUser, language) : undefined),
+    [activeUser, language],
+  );
+  const watchlistRanking = useMemo(
+    () => (activeUser ? buildWatchlistRanking(activeUser, language) : []),
+    [activeUser, language],
+  );
 
   useEffect(() => {
     setMatchPage(1);
@@ -722,8 +744,10 @@ export default function App() {
       if (!validation.ok) throw new Error(validationBody.error ?? "tmdb_token_invalid");
       localStorage.setItem("tastetwin.tmdbToken", tmdbToken.trim());
 
-      const films = activeUser.films.filter((film) => film.watchlist || (film.rating ?? 0) >= 4);
-      if (!films.length) throw new Error("zenginlestirilecek_puanli_veya_watchlist_filmi_yok");
+      const films = activeUser.films.filter(
+        (film) => film.watchlist || film.rating !== undefined || film.watchedDates.length > 0 || film.liked,
+      );
+      if (!films.length) throw new Error("zenginlestirilecek_film_yok");
       const metadata = new Map<string, Partial<FilmSignal>>();
       const batchSize = 25;
       setTmdbRun({
@@ -749,7 +773,7 @@ export default function App() {
         for (const item of payload.results ?? []) metadata.set(item.key, item);
         setTmdbRun({
           phase: "enriching",
-          message: language === "tr" ? "Token dogrulandi; yonetmen, anahtar kelime ve benzer film verisi aliniyor." : "Token validated; loading directors, keywords and related films.",
+          message: language === "tr" ? "Sure, oyuncu, yonetmen, dil, ozet ve benzer film verisi aliniyor." : "Loading runtime, cast, directors, language, overview and related films.",
           processed: Math.min(offset + batchSize, films.length),
           total: films.length,
           enriched: metadata.size,
@@ -772,8 +796,8 @@ export default function App() {
       );
       setStatus(
         language === "tr"
-          ? `${metadata.size} filme TMDB yonetmen, anahtar kelime ve onerileri eklendi.`
-          : `Added TMDB directors, keywords and recommendations to ${metadata.size} films.`,
+          ? `${metadata.size} filme TMDB sure, ekip, dil, ozet ve onerileri eklendi.`
+          : `Added TMDB runtime, credits, language, overview and recommendations to ${metadata.size} films.`,
       );
       const completed: TmdbRunState = {
         phase: "done",
@@ -1091,6 +1115,8 @@ export default function App() {
             {tab === "overview" && (
               <section className="view-grid overview-grid">
                 <StatsPanel language={language} stats={stats} />
+                <FilmInsightsPanel language={language} insights={filmInsights!} />
+                <NextWatchPanel language={language} ranking={watchlistRanking} />
                 <PosterPanel language={language} films={activeUser.films} />
                 <BarsPanel title={t(language, "favoriteZones")} icon={<Film size={18} />} data={decadeData} />
                 <BarsPanel title={t(language, "tasteDna")} icon={<Heart size={18} />} data={genreTerms} />
@@ -1345,6 +1371,167 @@ function StatsPanel({
   );
 }
 
+function FilmInsightsPanel({
+  language,
+  insights,
+}: {
+  language: Language;
+  insights: ReturnType<typeof buildFilmInsights>;
+}) {
+  const metrics = [
+    [language === "tr" ? "Toplam izleme" : "Total views", insights.totalViews],
+    [language === "tr" ? "Izleme suresi" : "Watch time", formatRuntime(insights.totalRuntimeMinutes, language)],
+    [language === "tr" ? "Ortalama puan" : "Average rating", insights.averageRating ? insights.averageRating.toFixed(2) : "-"],
+    [language === "tr" ? "TMDB kapsami" : "TMDB coverage", `%${insights.metadataCoverage}`],
+  ];
+  const groups = [
+    [language === "tr" ? "Turler" : "Genres", insights.topGenres],
+    [language === "tr" ? "Yonetmenler" : "Directors", insights.topDirectors],
+    [language === "tr" ? "Oyuncular" : "Cast", insights.topCast],
+    [language === "tr" ? "Diller" : "Languages", insights.topLanguages],
+  ] as const;
+
+  return (
+    <>
+      <div className="panel film-insights" data-testid="film-insights">
+        <div className="panel-title">
+          <BarChart3 size={18} />
+          <h2>{language === "tr" ? "Film gecmisi istatistikleri" : "Film history insights"}</h2>
+        </div>
+        <div className="insight-metrics">
+          {metrics.map(([label, value]) => (
+            <div key={label}>
+              <strong>{value}</strong>
+              <span>{label}</span>
+            </div>
+          ))}
+        </div>
+        <p className="metadata-note">
+          {language === "tr"
+            ? `Sure hesabi ${insights.runtimeCoverage}% kapsama dayanir. Tekrar izlemeler dahil edilir; watchlist izlenmis sayilmaz.`
+            : `Watch time uses ${insights.runtimeCoverage}% runtime coverage. Rewatches count; watchlist-only films do not.`}
+        </p>
+      </div>
+      <div className="panel taste-facts">
+        <div className="panel-title">
+          <Sparkles size={18} />
+          <h2>{language === "tr" ? "En cok izlediklerin" : "Your most watched signals"}</h2>
+        </div>
+        <div className="ranked-groups">
+          {groups.map(([title, items]) => (
+            <section key={title}>
+              <h3>{title}</h3>
+              {items.length ? (
+                <ol>
+                  {items.slice(0, 5).map((item) => (
+                    <li key={item.name}>
+                      <span>{item.name}</span>
+                      <strong>{item.count}</strong>
+                    </li>
+                  ))}
+                </ol>
+              ) : (
+                <small>{language === "tr" ? "TMDB zenginlestirmesi gerekli" : "TMDB enrichment required"}</small>
+              )}
+            </section>
+          ))}
+        </div>
+      </div>
+      <div className="panel viewing-rhythm">
+        <div className="panel-title">
+          <Clock3 size={18} />
+          <h2>{language === "tr" ? "Izleme yogunlugu" : "Viewing rhythm"}</h2>
+        </div>
+        <MiniBars
+          data={insights.monthlyActivity}
+          empty={language === "tr" ? "Diary tarih verisi yok" : "No diary dates"}
+        />
+        <div className="weekday-row">
+          {insights.weekdayActivity.map((item) => (
+            <div key={item.name}>
+              <strong>{item.count}</strong>
+              <span>{item.name}</span>
+            </div>
+          ))}
+        </div>
+      </div>
+    </>
+  );
+}
+
+function MiniBars({ data, empty }: { data: Array<{ name: string; count: number }>; empty: string }) {
+  if (!data.length) return <p className="muted-line">{empty}</p>;
+  const max = Math.max(...data.map((item) => item.count), 1);
+  return (
+    <div className="mini-bars">
+      {data.map((item) => (
+        <div key={item.name} title={`${item.name}: ${item.count}`}>
+          <span style={{ height: `${Math.max(5, (item.count / max) * 100)}%` }} />
+          <small>{item.name.slice(5)}</small>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function NextWatchPanel({
+  language,
+  ranking,
+}: {
+  language: Language;
+  ranking: ReturnType<typeof buildWatchlistRanking>;
+}) {
+  const [mode, setMode] = useState<NextWatchMode>("taste");
+  const [seed, setSeed] = useState(0);
+  const pick = useMemo(() => pickNextWatch(ranking, mode, seed), [mode, ranking, seed]);
+
+  return (
+    <div className="panel next-watch" data-testid="next-watch">
+      <div className="panel-title">
+        <Dices size={18} />
+        <h2>{language === "tr" ? "Siradaki film" : "Next watch"}</h2>
+      </div>
+      <div className="mode-switch" role="group" aria-label={language === "tr" ? "Secim modu" : "Pick mode"}>
+        {([
+          ["taste", language === "tr" ? "Zevkime gore" : "Taste fit"],
+          ["short", language === "tr" ? "Kisa" : "Short"],
+          ["random", language === "tr" ? "Rastgele" : "Random"],
+        ] as Array<[NextWatchMode, string]>).map(([value, label]) => (
+          <button className={mode === value ? "active" : ""} onClick={() => setMode(value)} key={value}>
+            {label}
+          </button>
+        ))}
+      </div>
+      {pick ? (
+        <div className="next-watch-body">
+          <PosterTile film={pick.film} index={0} />
+          <div>
+            <h3>
+              {pick.film.title} {pick.film.year ? `(${pick.film.year})` : ""}
+            </h3>
+            <p className="next-watch-meta">
+              {pick.film.runtimeMinutes ? `${pick.film.runtimeMinutes} dk` : language === "tr" ? "Sure verisi yok" : "No runtime"}
+              {pick.film.directors[0] ? ` · ${pick.film.directors[0]}` : ""}
+            </p>
+            <p>{pick.film.overview || pick.reason}</p>
+            {pick.film.overview && <small>{pick.reason}</small>}
+            <button className="secondary-button" onClick={() => setSeed((current) => current + 1)}>
+              <RefreshCcw size={16} />
+              {language === "tr" ? "Baska sec" : "Pick another"}
+            </button>
+          </div>
+        </div>
+      ) : (
+        <p className="empty-state">
+          {language === "tr"
+            ? "Izlenmemis watchlist filmi yok. Once Letterboxd exportunu yenile."
+            : "No unwatched watchlist films. Refresh your Letterboxd export first."}
+        </p>
+      )}
+    </div>
+  );
+}
+
 function SocialPanel({
   language,
   data,
@@ -1560,6 +1747,11 @@ function SocialDirectory({
   const [activity, setActivity] = useState<"any" | "known" | "unknown">("any");
   const [category, setCategory] = useState<SocialDirectoryFilters["category"]>("all");
   const [minTaste, setMinTaste] = useState(0);
+  const [maxTaste, setMaxTaste] = useState(100);
+  const [minDirectoryActivity, setMinDirectoryActivity] = useState(0);
+  const [maxDirectoryActivity, setMaxDirectoryActivity] = useState(100);
+  const [minDirectoryConnections, setMinDirectoryConnections] = useState(0);
+  const [maxDirectoryConnections, setMaxDirectoryConnections] = useState(9999);
   const [sort, setSort] = useState<SocialDirectorySort>("relationship");
   const [pageSize, setPageSize] = useState(100);
   const [page, setPage] = useState(1);
@@ -1574,8 +1766,22 @@ function SocialDirectory({
     [data, matches, users],
   );
   const filtered = useMemo(
-    () => filterAndSortSocialDirectory(directory, { query, myFollow, followsMe, source, activity, category, minTaste, sort }),
-    [activity, category, directory, followsMe, minTaste, myFollow, query, sort, source],
+    () => filterAndSortSocialDirectory(directory, {
+      query,
+      myFollow,
+      followsMe,
+      source,
+      activity,
+      category,
+      minTaste,
+      maxTaste,
+      minActivity: minDirectoryActivity,
+      maxActivity: maxDirectoryActivity,
+      minConnections: minDirectoryConnections,
+      maxConnections: maxDirectoryConnections,
+      sort,
+    }),
+    [activity, category, directory, followsMe, maxDirectoryActivity, maxDirectoryConnections, maxTaste, minDirectoryActivity, minDirectoryConnections, minTaste, myFollow, query, sort, source],
   );
   const pagination = useMemo(
     () => paginateSocialDirectory(filtered, page, pageSize),
@@ -1584,7 +1790,7 @@ function SocialDirectory({
 
   useEffect(() => {
     setPage(1);
-  }, [activity, category, followsMe, minTaste, myFollow, pageSize, query, sort, source]);
+  }, [activity, category, followsMe, maxDirectoryActivity, maxDirectoryConnections, maxTaste, minDirectoryActivity, minDirectoryConnections, minTaste, myFollow, pageSize, query, sort, source]);
 
   const activityKnown = filtered.filter((entry) => entry.activity?.lastActivityAt).length;
   const missingActivity = directory.filter((entry) => !entry.activity?.lastActivityAt);
@@ -1680,6 +1886,36 @@ function SocialDirectory({
           options={[0, 40, 50, 60, 70, 80, 90].map((score) => [String(score), score ? `${score}+` : language === "tr" ? "Fark etmez" : "Any"])}
         />
         <DirectorySelect
+          label={language === "tr" ? "En cok zevk puani" : "Maximum taste"}
+          value={String(maxTaste)}
+          onChange={(value) => setMaxTaste(Number(value))}
+          options={[40, 50, 60, 70, 80, 90, 100].map((score) => [String(score), score === 100 ? language === "tr" ? "Fark etmez" : "Any" : String(score)])}
+        />
+        <DirectorySelect
+          label={language === "tr" ? "Minimum aktiflik" : "Minimum activity"}
+          value={String(minDirectoryActivity)}
+          onChange={(value) => setMinDirectoryActivity(Number(value))}
+          options={[0, 10, 25, 40, 60, 80].map((score) => [String(score), score ? `${score}+` : language === "tr" ? "Fark etmez" : "Any"])}
+        />
+        <DirectorySelect
+          label={language === "tr" ? "Maksimum aktiflik" : "Maximum activity"}
+          value={String(maxDirectoryActivity)}
+          onChange={(value) => setMaxDirectoryActivity(Number(value))}
+          options={[10, 25, 40, 60, 80, 100].map((score) => [String(score), score === 100 ? language === "tr" ? "Fark etmez" : "Any" : String(score)])}
+        />
+        <DirectorySelect
+          label={language === "tr" ? "Min ortak baglanti" : "Min mutual links"}
+          value={String(minDirectoryConnections)}
+          onChange={(value) => setMinDirectoryConnections(Number(value))}
+          options={[0, 1, 2, 5, 10, 20, 50].map((count) => [String(count), count ? `${count}+` : language === "tr" ? "Fark etmez" : "Any"])}
+        />
+        <DirectorySelect
+          label={language === "tr" ? "Maks ortak baglanti" : "Max mutual links"}
+          value={String(maxDirectoryConnections)}
+          onChange={(value) => setMaxDirectoryConnections(Number(value))}
+          options={[2, 5, 10, 20, 50, 100, 9999].map((count) => [String(count), count === 9999 ? language === "tr" ? "Fark etmez" : "Any" : String(count)])}
+        />
+        <DirectorySelect
           label={language === "tr" ? "Sirala" : "Sort"}
           value={sort}
           onChange={(value) => setSort(value as SocialDirectorySort)}
@@ -1728,6 +1964,7 @@ function SocialDirectory({
           </span>
         </div>
       )}
+      <SocialActionWorkbench language={language} directory={directory} />
       <SocialDirectoryList entries={pagination.items} language={language} onSelectMatch={onSelectMatch} />
       {filtered.length > 0 && (
         <nav className="match-pagination directory-pagination">
@@ -1747,6 +1984,138 @@ function SocialDirectory({
             <ArrowRight size={16} />
           </button>
         </nav>
+      )}
+    </div>
+  );
+}
+
+function SocialActionWorkbench({
+  language,
+  directory,
+}: {
+  language: Language;
+  directory: SocialDirectoryEntry[];
+}) {
+  const [rule, setRule] = useState<SocialActionRule>({
+    action: "unfollow",
+    inactiveDays: 180,
+    minTaste: 0,
+    maxTaste: 55,
+    minActivity: 0,
+    maxActivity: 35,
+    followsMe: "any",
+  });
+  const [expanded, setExpanded] = useState(false);
+  const candidates = useMemo(() => buildSocialActionCandidates(directory, rule), [directory, rule]);
+
+  function setAction(action: SocialAction) {
+    setRule(
+      action === "unfollow"
+        ? { action, inactiveDays: 180, minTaste: 0, maxTaste: 55, minActivity: 0, maxActivity: 35, followsMe: "any" }
+        : { action, inactiveDays: 0, minTaste: 70, maxTaste: 100, minActivity: 50, maxActivity: 100, followsMe: "any" },
+    );
+  }
+
+  async function copyCandidates() {
+    await navigator.clipboard.writeText(candidates.map(({ entry }) => `@${entry.username}`).join("\n"));
+  }
+
+  return (
+    <div className="social-action-workbench" data-testid="social-action-workbench">
+      <button className="workbench-summary" onClick={() => setExpanded((value) => !value)} aria-expanded={expanded}>
+        <Filter size={17} />
+        <span>{language === "tr" ? "Takip islem kurallari" : "Follow action rules"}</span>
+        <strong>{candidates.length}</strong>
+        <ArrowRight className={expanded ? "rotate" : ""} size={17} />
+      </button>
+      {expanded && (
+        <div className="workbench-body">
+          <p>
+            {language === "tr"
+              ? "Kurallar yalnizca aday listesi uretir. Letterboxd toplu otomasyonu ve asiri takip davranisini kisitladigi icin hesap degisikligi otomatik yapilmaz."
+              : "Rules only create a review queue. Letterboxd restricts bulk automation and excessive following, so account changes are never executed automatically."}
+          </p>
+          <div className="workbench-controls">
+            <DirectorySelect
+              label={language === "tr" ? "Islem" : "Action"}
+              value={rule.action}
+              onChange={(value) => setAction(value as SocialAction)}
+              options={[
+                ["unfollow", language === "tr" ? "Takipten cik adayi" : "Unfollow candidate"],
+                ["follow", language === "tr" ? "Takip et adayi" : "Follow candidate"],
+              ]}
+            />
+            <DirectorySelect
+              label={language === "tr" ? "Pasiflik" : "Inactivity"}
+              value={String(rule.inactiveDays)}
+              onChange={(value) => setRule((current) => ({ ...current, inactiveDays: Number(value) }))}
+              options={[0, 30, 90, 180, 365].map((days) => [
+                String(days),
+                days ? `${days}+ ${language === "tr" ? "gun" : "days"}` : language === "tr" ? "Fark etmez" : "Any",
+              ])}
+            />
+            <DirectorySelect
+              label={language === "tr" ? "En az zevk" : "Minimum taste"}
+              value={String(rule.minTaste)}
+              onChange={(value) => setRule((current) => ({ ...current, minTaste: Number(value) }))}
+              options={[0, 40, 50, 60, 70, 80].map((score) => [String(score), score ? `${score}+` : language === "tr" ? "Fark etmez" : "Any"])}
+            />
+            <DirectorySelect
+              label={language === "tr" ? "En cok zevk" : "Maximum taste"}
+              value={String(rule.maxTaste)}
+              onChange={(value) => setRule((current) => ({ ...current, maxTaste: Number(value) }))}
+              options={[40, 50, 55, 60, 70, 100].map((score) => [String(score), score === 100 ? language === "tr" ? "Fark etmez" : "Any" : String(score)])}
+            />
+            <DirectorySelect
+              label={language === "tr" ? "Beni takip ediyor" : "Follows me"}
+              value={rule.followsMe}
+              onChange={(value) => setRule((current) => ({ ...current, followsMe: value as SocialActionRule["followsMe"] }))}
+              options={relationshipOptions(language)}
+            />
+            <DirectorySelect
+              label={language === "tr" ? "Minimum aktiflik" : "Minimum activity"}
+              value={String(rule.minActivity)}
+              onChange={(value) => setRule((current) => ({ ...current, minActivity: Number(value) }))}
+              options={[0, 10, 25, 40, 60, 80].map((score) => [String(score), score ? `${score}+` : language === "tr" ? "Fark etmez" : "Any"])}
+            />
+            <DirectorySelect
+              label={language === "tr" ? "Maksimum aktiflik" : "Maximum activity"}
+              value={String(rule.maxActivity)}
+              onChange={(value) => setRule((current) => ({ ...current, maxActivity: Number(value) }))}
+              options={[10, 25, 35, 50, 70, 100].map((score) => [String(score), score === 100 ? language === "tr" ? "Fark etmez" : "Any" : String(score)])}
+            />
+          </div>
+          <div className="queue-header">
+            <span>
+              {language === "tr"
+                ? `${candidates.length} aday bulundu; en fazla ilk 25 gosteriliyor.`
+                : `${candidates.length} candidates; showing up to 25.`}
+            </span>
+            <button className="secondary-button" disabled={!candidates.length} onClick={copyCandidates}>
+              <Copy size={15} />
+              {language === "tr" ? "Kullanicilari kopyala" : "Copy handles"}
+            </button>
+          </div>
+          <ul className="action-queue">
+            {candidates.slice(0, 25).map(({ entry, reasons }) => (
+              <li key={entry.username}>
+                <Avatar name={entry.displayName} src={entry.avatarUrl} />
+                <div>
+                  <strong>{entry.displayName}</strong>
+                  <span>@{entry.username} · {reasons.join(" · ")}</span>
+                </div>
+                <a
+                  href={`https://letterboxd.com/${entry.username}/`}
+                  target="_blank"
+                  rel="noreferrer"
+                  title={language === "tr" ? "Profili ac ve islemi onayla" : "Open profile and confirm"}
+                >
+                  <ExternalLink size={17} />
+                </a>
+              </li>
+            ))}
+          </ul>
+        </div>
       )}
     </div>
   );

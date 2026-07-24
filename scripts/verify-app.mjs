@@ -58,8 +58,27 @@ await page.evaluate(async () => {
     genres: [],
     directors: [],
     countries: [],
+    runtimeMinutes: 92,
+    cast: ["Watch Star"],
+    originalLanguage: "en",
+    overview: "A verified watchlist synopsis.",
+    tmdbId: "999001",
   };
-  const owner = { ...storedOwner, films: [...storedOwner.films, watchlistFilm] };
+  const enrichedOwnerFilms = storedOwner.films.map((film, index) =>
+    index < 10
+      ? {
+          ...film,
+          runtimeMinutes: 100 + index,
+          genres: index % 2 ? ["Drama"] : ["Comedy"],
+          directors: ["Verified Director"],
+          cast: ["Verified Actor", `Actor ${index}`],
+          originalLanguage: index % 2 ? "tr" : "en",
+          overview: `Verified overview ${index}`,
+          tmdbId: String(1000 + index),
+        }
+      : film,
+  );
+  const owner = { ...storedOwner, films: [...enrichedOwnerFilms, watchlistFilm] };
   const extras = Array.from({ length: 17 }, (_, index) => ({
     key: `candidate-${index}`,
     title: `Candidate ${index}`,
@@ -157,6 +176,15 @@ await page.reload({ waitUntil: "networkidle" });
 if ((await page.locator(".tabs button").count()) !== 2) throw new Error("The app should expose only Film and Social tabs");
 if ((await page.getByText("Paylasim karti", { exact: true }).count()) !== 0) throw new Error("Share card tab is still visible");
 if ((await page.getByText("Zevk eslesmeleri", { exact: true }).count()) !== 0) throw new Error("Separate taste-match tab is still visible");
+await page.locator('[data-testid="film-insights"]').waitFor();
+const insightText = await page.locator('[data-testid="film-insights"]').innerText();
+if (!insightText.includes("Izleme suresi") || !insightText.includes("TMDB kapsami")) {
+  throw new Error("Film history insight metrics missing");
+}
+const nextWatchText = await page.locator('[data-testid="next-watch"]').innerText();
+if (!nextWatchText.includes("Watchlist Only") || !nextWatchText.includes("verified watchlist synopsis")) {
+  throw new Error("TMDB-backed next-watch pick missing");
+}
 await page.locator(".tabs button").nth(1).click();
 await page.locator(".social-directory").waitFor();
 await page.locator(".match-detail-button").first().waitFor();
@@ -194,6 +222,12 @@ if (!(await page.locator(".social-directory-list .profile-arrow").first().getAtt
   throw new Error("Social directory Letterboxd link missing");
 }
 await page.locator(".member-search input").first().fill("");
+const activityFilter = page.locator(".social-directory-filters label").filter({ hasText: "Minimum aktiflik" });
+if ((await activityFilter.count()) !== 1) throw new Error("Minimum activity filter missing");
+await page.locator('[data-testid="social-action-workbench"] .workbench-summary').click();
+if (!(await page.locator('[data-testid="social-action-workbench"]').innerText()).includes("Maksimum aktiflik")) {
+  throw new Error("Activity-aware social action rules missing");
+}
 await page.locator(".member-search input").first().fill("member0000");
 const score = Number(await page.locator(".directory-score strong").first().innerText());
 await page.locator(".match-detail-button").first().click();

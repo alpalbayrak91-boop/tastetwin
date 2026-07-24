@@ -18,6 +18,10 @@ Son guncelleme: 24 Temmuz 2026
 - Sosyal ag ekrani tek bir baglanti yonetim dizinidir. Takip edilen, takipci, karsilikli, hayran, takipten cikan ve ikinci halka kesif hesaplari film verisi olmasa da eksiksiz listelenir.
 - Sosyal dizin arama, iki bagimsiz takip filtresi, kaynak ve aktiflik filtresi, aktif/pasif/baglanti/isim siralamasi ve 50/100/250 kisilik gercek sayfalama sunar.
 - Eslesme ve sosyal kisi kartlarinda gercek Letterboxd profiline dogrudan gecis vardir.
+- Sosyal dizin zevk, aktiflik ve ortak baglanti icin ayri minimum/maksimum filtreleri birlikte uygular.
+- Takip/takipten cik kurallari pasif gun, aktiflik, zevk ve takip yonlerine gore aday kuyrugu uretir; hesabi otomatik degistirmez.
+- Film paneli izleme suresi, izleme yogunlugu, puan ortalamasi ve en cok izlenen tur, yonetmen, oyuncu ve dili gosterir.
+- Siradaki film araci izlenmemis watchlistten zevk uyumu, kisa sure veya rastgele moda gore secim yapar.
 
 ## Puanlama v2
 
@@ -54,7 +58,7 @@ Ucuncu adim su an export/RSS metadata kalitesine baglidir. Daha iyi sonuc icin T
 - yalnizca kullanicinin Letterboxd watchlistindeki filmleri aday havuzu yap;
 - sonucu nedenleriyle acikla.
 
-TMDB entegrasyonu artik uygulamada calisan bir yerel ayar olarak bulunur. Kullanici TMDB API Read Access Token'ini girip dogrular; TasteTwin ortak sevilen ve watchlist filmlerine yonetmen, anahtar kelime, ulke, poster ve TMDB onerilerini ekler. Metadata yerel onbellekte tutulur. Token Letterboxd'a veya baska kullanicilara gonderilmez.
+TMDB entegrasyonu artik uygulamada calisan bir yerel ayar olarak bulunur. Kullanici TMDB API Read Access Token'ini girip dogrular; TasteTwin tum izlenmis ve watchlist filmlerine sure, oyuncu, yonetmen, dil, ozet, anahtar kelime, ulke, poster ve TMDB onerilerini ekler. Metadata yerel onbellekte tutulur. Token Letterboxd'a veya baska kullanicilara gonderilmez.
 
 Bu is icin yapay zeka zorunlu degildir. AI sonucun aciklamasini yazabilir; asil siralama tekrar uretilebilir kurallarla yapilmalidir.
 
@@ -73,6 +77,8 @@ TasteTwin'in su an guvenilir bicimde gosterdigi ortak baglanti, "senin takip ett
 
 Baglanti kalitesi, baglayici hesabin taranan following listesinin genisligine gore agirliklanir. Daha secici bir baglayici daha guclu sinyal sayilir. Bu hesap takipci sayisi veya sosyal statu tahmini degildir.
 
+Letterboxd Aralik 2025 kullanim kosullari otomatik veri toplama araclarini ve karsilikli takip toplamak icin asiri sayida hesabi takip etmeyi kisitlar. Bu nedenle TasteTwin kurallari otomatik tiklama yapmaz; aday, neden ve profil baglantisi gostererek son islemi kullaniciya birakir. Resmi yetkili API erisimi ve acik izin olmadan toplu takip otomasyonu yayinlanmamalidir.
+
 ## Bilinen eksikler ve sonraki adimlar
 
 - Paylasim karti 0.2.0 arayuzunden kaldirildi; sosyal kisi dizini urunun tek ana calisma alani.
@@ -89,3 +95,12 @@ Baglanti kalitesi, baglayici hesabin taranan following listesinin genisligine go
 - Takip, takipci, karsilikli, geri takip etmeyen, takip edilmeyen, yeni, cikan ve ag kesfi sayilari tiklanabilir filtrelerdir; tum sonuclar sayfalanir.
 - RSS aktiflik taramasi eksik verisi olan butun dizini partiler halinde tarar ve her partiyi kalici olarak kaydeder.
 - TMDB token dogrulama, ilerleme, zenginlestirilen film sayisi, hata ve son calisma zamani arayuzde gorunur.
+
+# 0.3.0 - Film zekasi ve sosyal kural kuyrugu
+
+- TMDB ayrintilari artik tam izlenmis/watchlist arsivine sure, oyuncu, yonetmen, dil, ozet ve benzer film verisi ekler.
+- Film gecmisi paneli toplam sureyi tekrar izlemelerle hesaplar; veri kapsamini acikca yazar.
+- En cok izlenen tur, yonetmen, oyuncu ve dil ile aylik/haftalik izleme yogunlugu gosterilir.
+- Siradaki film araci sadece izlenmemis watchlist girdilerinden zevk uyumlu, kisa veya rastgele secim yapar.
+- Sosyal dizinde zevk, aktiflik ve ortak baglanti icin minimum/maksimum filtreleri vardir.
+- Takip et/takipten cik aday kuyrugu ayrintili kurallarla olusur; otomatik hesap islemi yapmaz.

@@ -1,5 +1,6 @@
 node_modules/
 .electron-cache/
+tastetwin-verified*.png
 tastetwin-*-verified*.png
 dist/
 *.tsbuildinfo

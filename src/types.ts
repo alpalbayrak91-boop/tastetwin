@@ -14,6 +14,12 @@ export type FilmSignal = {
   genres: string[];
   directors: string[];
   countries: string[];
+  cast?: string[];
+  originalLanguage?: string;
+  runtimeMinutes?: number;
+  overview?: string;
+  tmdbVoteAverage?: number;
+  releaseDate?: string;
   posterUrl?: string;
   tmdbId?: string;
   keywords?: string[];

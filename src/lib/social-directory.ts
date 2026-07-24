@@ -46,6 +46,11 @@ export type SocialDirectoryFilters = {
     | "lost"
     | "network";
   minTaste: number;
+  maxTaste: number;
+  minActivity: number;
+  maxActivity: number;
+  minConnections: number;
+  maxConnections: number;
   sort: SocialDirectorySort;
 };
 
@@ -129,7 +134,12 @@ export function filterAndSortSocialDirectory(
         (filters.activity === "any" ||
           (filters.activity === "known" ? Boolean(entry.activity?.lastActivityAt) : !entry.activity?.lastActivityAt)) &&
         categoryMatches(filters.category, entry) &&
-        (filters.minTaste <= 0 || (entry.match?.score ?? -1) >= filters.minTaste)
+        (filters.minTaste <= 0 || (entry.match?.score ?? -1) >= filters.minTaste) &&
+        (filters.maxTaste >= 100 || (entry.match?.score ?? 101) <= filters.maxTaste) &&
+        (filters.minActivity <= 0 || (entry.activity?.activityScore ?? -1) >= filters.minActivity) &&
+        (filters.maxActivity >= 100 || (entry.activity?.activityScore ?? 101) <= filters.maxActivity) &&
+        (entry.connections ?? 0) >= filters.minConnections &&
+        (filters.maxConnections >= 9999 || (entry.connections ?? 0) <= filters.maxConnections)
       );
     })
     .sort((a, b) => compareEntries(a, b, filters.sort));

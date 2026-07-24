@@ -871,7 +871,15 @@ async function fetchTmdbMetadata(title, year, token) {
   return {
     tmdbId: String(details.id),
     posterUrl: details.poster_path ? `https://image.tmdb.org/t/p/w500${details.poster_path}` : undefined,
+    runtimeMinutes: Number(details.runtime) || undefined,
+    originalLanguage: details.original_language ? String(details.original_language) : undefined,
+    overview: details.overview ? String(details.overview) : undefined,
+    tmdbVoteAverage: Number(details.vote_average) || undefined,
+    releaseDate: details.release_date ? String(details.release_date) : undefined,
     genres: Array.isArray(details.genres) ? details.genres.map((genre) => String(genre.name)).filter(Boolean) : [],
+    cast: Array.isArray(details.credits?.cast)
+      ? details.credits.cast.slice(0, 12).map((person) => String(person.name)).filter(Boolean)
+      : [],
     directors: Array.isArray(details.credits?.crew)
       ? details.credits.crew
           .filter((person) => person.job === "Director")

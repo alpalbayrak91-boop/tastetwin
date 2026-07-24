@@ -14,8 +14,11 @@ TasteTwin is a local-first Letterboxd social graph and movie taste matching app.
 - Opens each match into a rated common-film and divergence breakdown.
 - Combines social and two-hop network scanning in one extension action while saving the social stage first.
 - Provides numeric filters, sorting, pagination, weighted mutual connections, and recent film-activity signals.
+- Builds a review-only follow/unfollow candidate queue from relationship, inactivity, activity, taste, and mutual-link rules.
 - Excludes watchlist and unrated entries from co-rated match evidence.
 - Uses a separate validity percentage based on the number of co-rated films.
+- Shows total viewing time, average rating, viewing rhythm, and top genres, directors, actors, and languages.
+- Picks a taste-based, short, or random next watch from unwatched watchlist entries with a synopsis and reason.
 - Keeps imported and scanned data on the user's computer.
 
 ## Install on Windows
@@ -39,7 +42,9 @@ The displayed taste score uses only films rated by both people. Rating gaps of 0
 
 The current scoring model, social-data limits, TMDB recommendation plan, and known gaps are recorded in [docs/PRODUCT-NOTES.md](docs/PRODUCT-NOTES.md).
 
-Optional TMDB enrichment accepts the user's local API Read Access Token and adds recommendations, keywords, directors, countries, and posters to shared-love/watchlist matching. The TMDB token is stored only in local app storage.
+Optional TMDB enrichment accepts the user's local API Read Access Token and adds runtime, cast, directors, genres, language, synopsis, recommendations, keywords, countries, and posters. It enriches the full watched/watchlist archive so personal statistics are not based on a small favorite-only sample. The TMDB token is stored only in local app storage.
+
+TasteTwin does not automatically follow or unfollow accounts. Letterboxd restricts automated extraction and excessive following, so social rules produce a transparent review queue with profile links instead.
 
 For a public or revenue-generating release, asking every user to enter a personal TMDB key does not by itself settle licensing. Review TMDB's current terms and attribution requirements before release.
 
