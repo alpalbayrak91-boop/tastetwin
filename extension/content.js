@@ -20,6 +20,7 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
 });
 
 void claimAppRequestedScan();
+void claimAppRequestedManage();
 
 function startScan(mode) {
   if (!activeScan) {
@@ -41,6 +42,77 @@ async function claimAppRequestedScan() {
   } catch {
     // The local app may be closed or this page may not be the requested profile.
   }
+}
+
+async function claimAppRequestedManage() {
+  const handle = currentHandle();
+  if (!handle) return;
+  try {
+    const result = await chrome.runtime.sendMessage({ type: "claimPendingManage", handle });
+    if (!result?.ok || !result.pending) return;
+    highlightRelationshipControl(result.action);
+  } catch {
+    // TasteTwin may be closed or this may not be the requested profile.
+  }
+}
+
+function highlightRelationshipControl(action) {
+  const candidates = [
+    ...document.querySelectorAll(
+      ".js-follow-button, [data-owner-action='follow'], [data-owner-action='unfollow'], .button.-action-follow, .actions-panel button, .actions-panel a",
+    ),
+  ];
+  const control = candidates.find((element) => {
+    const text = (element.textContent ?? "").trim().toLowerCase();
+    return action === "unfollow"
+      ? /following|takiptesin|unfollow/.test(text)
+      : /follow|takip et/.test(text) && !/following|unfollow/.test(text);
+  });
+  const banner = document.createElement("div");
+  banner.id = "tastetwin-manage-guide";
+  banner.textContent =
+    action === "unfollow"
+      ? "TasteTwin: Takipten cikmak icin vurgulanan Letterboxd dugmesini sen onayla."
+      : "TasteTwin: Takip etmek icin vurgulanan Letterboxd dugmesini sen onayla.";
+  Object.assign(banner.style, {
+    position: "fixed",
+    zIndex: "2147483647",
+    right: "20px",
+    top: "20px",
+    maxWidth: "360px",
+    padding: "14px 18px",
+    background: "#151515",
+    color: "#fff",
+    border: "2px solid #ff8000",
+    borderRadius: "6px",
+    font: "700 14px/1.4 system-ui, sans-serif",
+    boxShadow: "0 12px 35px rgba(0,0,0,.35)",
+  });
+  document.body.append(banner);
+  window.setTimeout(() => banner.remove(), 12000);
+  if (!control) return;
+  control.addEventListener(
+    "click",
+    () => {
+      window.setTimeout(() => {
+        chrome.runtime.sendMessage({
+          type: "relationshipChanged",
+          handle: currentHandle(),
+          action,
+        }).catch(() => {});
+      }, 900);
+    },
+    { once: true },
+  );
+  control.scrollIntoView({ behavior: "smooth", block: "center" });
+  control.style.outline = "4px solid #ff8000";
+  control.style.outlineOffset = "4px";
+  control.style.boxShadow = "0 0 0 8px rgba(255,128,0,.24)";
+  window.setTimeout(() => {
+    control.style.outline = "";
+    control.style.outlineOffset = "";
+    control.style.boxShadow = "";
+  }, 12000);
 }
 
 async function runScan(mode) {

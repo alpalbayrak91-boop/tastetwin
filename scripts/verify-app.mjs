@@ -73,6 +73,7 @@ await page.evaluate(async () => {
           directors: ["Verified Director"],
           cast: ["Verified Actor", `Actor ${index}`],
           originalLanguage: index % 2 ? "tr" : "en",
+          watchedDates: [`2025-${String((index % 10) + 1).padStart(2, "0")}-15`],
           overview: `Verified overview ${index}`,
           tmdbId: String(1000 + index),
         }
@@ -176,15 +177,26 @@ await page.reload({ waitUntil: "networkidle" });
 if ((await page.locator(".tabs button").count()) !== 2) throw new Error("The app should expose only Film and Social tabs");
 if ((await page.getByText("Paylasim karti", { exact: true }).count()) !== 0) throw new Error("Share card tab is still visible");
 if ((await page.getByText("Zevk eslesmeleri", { exact: true }).count()) !== 0) throw new Error("Separate taste-match tab is still visible");
+await page.locator(".film-data-health").waitFor();
+if (!(await page.locator(".film-data-health").innerText()).includes("film TMDB verili")) {
+  throw new Error("Exact film data coverage is missing");
+}
+await page.locator(".film-workspace-tabs button").filter({ hasText: "Istatistikler" }).click();
 await page.locator('[data-testid="film-insights"]').waitFor();
 const insightText = await page.locator('[data-testid="film-insights"]').innerText();
-if (!insightText.includes("Izleme suresi") || !insightText.includes("TMDB kapsami")) {
+if (!insightText.includes("Toplam dakika") || !insightText.includes("1.045 dk") || !insightText.includes("TMDB kapsami")) {
   throw new Error("Film history insight metrics missing");
 }
+await page.locator(".film-workspace-tabs button").filter({ hasText: "Izleme gecmisi" }).click();
+if (!(await page.locator(".viewing-rhythm").innerText()).includes("Aylara gore film dagilimi")) {
+  throw new Error("Monthly film distribution missing");
+}
+await page.locator(".film-workspace-tabs button").filter({ hasText: "Genel bakis" }).click();
 const nextWatchText = await page.locator('[data-testid="next-watch"]').innerText();
 if (!nextWatchText.includes("Watchlist Only") || !nextWatchText.includes("verified watchlist synopsis")) {
   throw new Error("TMDB-backed next-watch pick missing");
 }
+await page.screenshot({ path: screenshotPath.replace(/\.png$/i, "-film.png"), fullPage: true });
 await page.locator(".tabs button").nth(1).click();
 await page.locator(".social-directory").waitFor();
 await page.locator(".match-detail-button").first().waitFor();
@@ -224,9 +236,14 @@ if (!(await page.locator(".social-directory-list .profile-arrow").first().getAtt
 await page.locator(".member-search input").first().fill("");
 const activityFilter = page.locator(".social-directory-filters label").filter({ hasText: "Minimum aktiflik" });
 if ((await activityFilter.count()) !== 1) throw new Error("Minimum activity filter missing");
-await page.locator('[data-testid="social-action-workbench"] .workbench-summary').click();
-if (!(await page.locator('[data-testid="social-action-workbench"]').innerText()).includes("Maksimum aktiflik")) {
-  throw new Error("Activity-aware social action rules missing");
+await page.getByRole("button", { name: /Bu kriterlerdeki herkesi sec/ }).click();
+await page.getByRole("button", { name: /Secilen .* kisiyi listeye ekle/ }).click();
+await page.locator('[data-testid="social-review-queue"]').waitFor();
+if (!(await page.locator('[data-testid="social-review-queue"]').innerText()).includes("Son tiklama sende kalir")) {
+  throw new Error("Filtered social review queue missing");
+}
+if (!(await page.locator(".queue-tabs").innerText()).includes("1255")) {
+  throw new Error("Persistent bulk management queue count missing");
 }
 await page.locator(".member-search input").first().fill("member0000");
 const score = Number(await page.locator(".directory-score strong").first().innerText());

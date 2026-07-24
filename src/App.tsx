@@ -55,11 +55,6 @@ import {
   pickNextWatch,
   type NextWatchMode,
 } from "./lib/film-insights";
-import {
-  buildSocialActionCandidates,
-  type SocialAction,
-  type SocialActionRule,
-} from "./lib/social-actions";
 import { buildMatchesAsync, buildRecommendations, decadeTerms, getStats, topTerms } from "./lib/taste";
 import type { FilmSignal, Language, MatchResult, UserTaste } from "./types";
 
@@ -77,6 +72,7 @@ type SocialData =
       available: true;
       handle: string;
       checkedAt: string;
+      liveUpdatedAt?: string;
       source: "official-api" | "public-pages" | "browser-session" | "browser-extension";
       scanStage?: "social-complete" | "network-complete";
       complete?: boolean;
@@ -419,6 +415,41 @@ export default function App() {
     window.addEventListener("message", receiveBrowserScan);
     return () => window.removeEventListener("message", receiveBrowserScan);
   }, [language, uploadedUser]);
+
+  useEffect(() => {
+    const ownerHandle = accountHandle || activeUser?.handle;
+    if (!ownerHandle) return;
+    let stopped = false;
+    let since = new Date().toISOString();
+    async function pullRelationshipEvents() {
+      try {
+        const response = await fetch(`/api/letterboxd/relationship-events?since=${encodeURIComponent(since)}`);
+        const payload = await response.json();
+        const events = Array.isArray(payload.events) ? payload.events : [];
+        for (const event of events) {
+          if (stopped || typeof event?.occurredAt !== "string") continue;
+          since = event.occurredAt;
+          setSocialByHandle((current) => {
+            const social = current[ownerHandle];
+            if (!social?.available) return current;
+            return { ...current, [ownerHandle]: applyRelationshipEvent(social, event.handle, event.action) };
+          });
+          setStatus(
+            language === "tr"
+              ? `Canli guncelleme: @${event.handle} ${event.action === "follow" ? "takip listesine eklendi" : "takip listesinden cikarildi"}.`
+              : `Live update: @${event.handle} was ${event.action === "follow" ? "added to" : "removed from"} following.`,
+          );
+        }
+      } catch {
+        // The desktop bridge can be briefly unavailable during app restarts.
+      }
+    }
+    const timer = window.setInterval(pullRelationshipEvents, 2000);
+    return () => {
+      stopped = true;
+      window.clearInterval(timer);
+    };
+  }, [accountHandle, activeUser?.handle, language]);
 
   async function handleUpload(file?: File) {
     if (!file) return;
@@ -1113,16 +1144,21 @@ export default function App() {
             </header>
 
             {tab === "overview" && (
-              <section className="view-grid overview-grid">
-                <StatsPanel language={language} stats={stats} />
-                <FilmInsightsPanel language={language} insights={filmInsights!} />
-                <NextWatchPanel language={language} ranking={watchlistRanking} />
-                <PosterPanel language={language} films={activeUser.films} />
-                <BarsPanel title={t(language, "favoriteZones")} icon={<Film size={18} />} data={decadeData} />
-                <BarsPanel title={t(language, "tasteDna")} icon={<Heart size={18} />} data={genreTerms} />
-                <SignalPanel language={language} user={activeUser} directors={directorTerms} />
-                <RecommendationPanel language={language} recommendations={recommendations} />
-              </section>
+              <FilmWorkspace
+                language={language}
+                user={activeUser}
+                stats={stats}
+                insights={filmInsights!}
+                ranking={watchlistRanking}
+                recommendations={recommendations}
+                decadeData={decadeData}
+                genreTerms={genreTerms}
+                directorTerms={directorTerms}
+                tmdbLoading={tmdbLoading}
+                tmdbRun={tmdbRun}
+                onEnrich={enrichWithTmdb}
+                hasTmdbToken={Boolean(tmdbToken.trim())}
+              />
             )}
 
             {tab === "matches" && (
@@ -1343,6 +1379,156 @@ export default function App() {
   );
 }
 
+type FilmWorkspaceView = "summary" | "stats" | "rhythm" | "recommendations";
+
+function FilmWorkspace({
+  language,
+  user,
+  stats,
+  insights,
+  ranking,
+  recommendations,
+  decadeData,
+  genreTerms,
+  directorTerms,
+  tmdbLoading,
+  tmdbRun,
+  onEnrich,
+  hasTmdbToken,
+}: {
+  language: Language;
+  user: UserTaste;
+  stats: ReturnType<typeof getStats>;
+  insights: ReturnType<typeof buildFilmInsights>;
+  ranking: ReturnType<typeof buildWatchlistRanking>;
+  recommendations: ReturnType<typeof buildRecommendations>;
+  decadeData: Array<[string, number]>;
+  genreTerms: Array<[string, number]>;
+  directorTerms: Array<[string, number]>;
+  tmdbLoading: boolean;
+  tmdbRun: TmdbRunState;
+  onEnrich: () => void;
+  hasTmdbToken: boolean;
+}) {
+  const [view, setView] = useState<FilmWorkspaceView>("summary");
+  const enrichable = user.films.filter(
+    (film) => film.watchlist || film.rating !== undefined || film.watchedDates.length > 0 || film.liked,
+  );
+  const enriched = enrichable.filter((film) => film.tmdbId).length;
+  const views: Array<[FilmWorkspaceView, string, typeof Film]> = [
+    ["summary", language === "tr" ? "Genel bakis" : "Overview", Film],
+    ["stats", language === "tr" ? "Istatistikler" : "Statistics", BarChart3],
+    ["rhythm", language === "tr" ? "Izleme gecmisi" : "Viewing history", Clock3],
+    ["recommendations", language === "tr" ? "Ne izlesem?" : "What to watch", Sparkles],
+  ];
+
+  return (
+    <section className="film-workspace">
+      <nav className="film-workspace-tabs" aria-label={language === "tr" ? "Film paneli bolumleri" : "Film dashboard sections"}>
+        {views.map(([id, label, Icon]) => (
+          <button key={id} className={view === id ? "active" : ""} onClick={() => setView(id)}>
+            <Icon size={17} />
+            <span>{label}</span>
+          </button>
+        ))}
+      </nav>
+
+      <div className={`film-data-health ${enriched < enrichable.length ? "incomplete" : "complete"}`}>
+        <div>
+          <strong>{language === "tr" ? "Veri kapsami" : "Data coverage"}</strong>
+          <span>
+            {language === "tr"
+              ? `${stats.watched} izlenmis film · ${insights.diaryEntries} tarihli diary kaydi · ${enriched}/${enrichable.length} film TMDB verili · ${insights.runtimeFilms} filmde sure`
+              : `${stats.watched} watched · ${insights.diaryEntries} dated diary entries · ${enriched}/${enrichable.length} with TMDB data · ${insights.runtimeFilms} with runtime`}
+          </span>
+          {tmdbRun.lastRun && (
+            <small>
+              {language === "tr" ? "Son TMDB islemi" : "Last TMDB run"}:{" "}
+              {new Date(tmdbRun.lastRun).toLocaleString(language === "tr" ? "tr-TR" : "en-US")}
+            </small>
+          )}
+        </div>
+        {enriched < enrichable.length && (
+          <button className="primary-button" onClick={onEnrich} disabled={!hasTmdbToken || tmdbLoading}>
+            {tmdbLoading ? <Loader2 className="spin" size={16} /> : <Sparkles size={16} />}
+            <span>
+              {!hasTmdbToken
+                ? language === "tr"
+                  ? "Once soldan TMDB tokeni gir"
+                  : "Add a TMDB token in the sidebar"
+                : language === "tr"
+                  ? `Eksik ${enrichable.length - enriched} filmi tamamla`
+                  : `Complete ${enrichable.length - enriched} films`}
+            </span>
+          </button>
+        )}
+      </div>
+
+      {view === "summary" && (
+        <div className="film-view film-summary-view">
+          <StatsPanel language={language} stats={stats} />
+          <div className="film-summary-grid">
+            <NextWatchPanel language={language} ranking={ranking} />
+            <PosterPanel language={language} films={user.films} />
+          </div>
+          <div className="film-summary-shortcuts">
+            <button onClick={() => setView("stats")}>
+              <BarChart3 size={20} />
+              <strong>
+                {insights.totalRuntimeMinutes.toLocaleString(language === "tr" ? "tr-TR" : "en-US")}{" "}
+                {language === "tr" ? "dk" : "min"}
+              </strong>
+              <span>
+                {language === "tr"
+                  ? `${formatRuntime(insights.totalRuntimeMinutes, language)} toplam izleme`
+                  : `${formatRuntime(insights.totalRuntimeMinutes, language)} total watch time`}
+              </span>
+            </button>
+            <button onClick={() => setView("stats")}>
+              <Users size={20} />
+              <strong>{insights.topCast[0]?.name ?? "-"}</strong>
+              <span>{language === "tr" ? "en cok izlenen oyuncu" : "most watched actor"}</span>
+            </button>
+            <button onClick={() => setView("rhythm")}>
+              <Clock3 size={20} />
+              <strong>{insights.monthlyActivity.at(-1)?.count ?? 0}</strong>
+              <span>{language === "tr" ? "son kayitli ay" : "latest recorded month"}</span>
+            </button>
+            <button onClick={() => setView("recommendations")}>
+              <Heart size={20} />
+              <strong>{ranking.length}</strong>
+              <span>{language === "tr" ? "izlenmemis watchlist adayi" : "unwatched watchlist picks"}</span>
+            </button>
+          </div>
+        </div>
+      )}
+
+      {view === "stats" && (
+        <div className="film-view film-panel-grid">
+          <FilmInsightsPanel language={language} insights={insights} />
+          <BarsPanel title={t(language, "tasteDna")} icon={<Heart size={18} />} data={genreTerms} />
+          <SignalPanel language={language} user={user} directors={directorTerms} />
+        </div>
+      )}
+
+      {view === "rhythm" && (
+        <div className="film-view film-panel-grid">
+          <ViewingRhythmPanel language={language} insights={insights} />
+          <BarsPanel title={t(language, "favoriteZones")} icon={<Film size={18} />} data={decadeData} />
+          <PosterPanel language={language} films={user.films} />
+        </div>
+      )}
+
+      {view === "recommendations" && (
+        <div className="film-view film-recommendations-grid">
+          <NextWatchPanel language={language} ranking={ranking} />
+          <RecommendationPanel language={language} recommendations={recommendations} />
+        </div>
+      )}
+    </section>
+  );
+}
+
 function StatsPanel({
   language,
   stats,
@@ -1380,7 +1566,10 @@ function FilmInsightsPanel({
 }) {
   const metrics = [
     [language === "tr" ? "Toplam izleme" : "Total views", insights.totalViews],
-    [language === "tr" ? "Izleme suresi" : "Watch time", formatRuntime(insights.totalRuntimeMinutes, language)],
+    [
+      language === "tr" ? "Toplam dakika" : "Total minutes",
+      `${insights.totalRuntimeMinutes.toLocaleString(language === "tr" ? "tr-TR" : "en-US")} ${language === "tr" ? "dk" : "min"}`,
+    ],
     [language === "tr" ? "Ortalama puan" : "Average rating", insights.averageRating ? insights.averageRating.toFixed(2) : "-"],
     [language === "tr" ? "TMDB kapsami" : "TMDB coverage", `%${insights.metadataCoverage}`],
   ];
@@ -1408,8 +1597,8 @@ function FilmInsightsPanel({
         </div>
         <p className="metadata-note">
           {language === "tr"
-            ? `Sure hesabi ${insights.runtimeCoverage}% kapsama dayanir. Tekrar izlemeler dahil edilir; watchlist izlenmis sayilmaz.`
-            : `Watch time uses ${insights.runtimeCoverage}% runtime coverage. Rewatches count; watchlist-only films do not.`}
+            ? `${formatRuntime(insights.totalRuntimeMinutes, language)}. Sure hesabi ${insights.runtimeCoverage}% kapsama dayanir. Tekrar izlemeler dahil edilir; watchlist izlenmis sayilmaz.`
+            : `${formatRuntime(insights.totalRuntimeMinutes, language)}. Watch time uses ${insights.runtimeCoverage}% runtime coverage. Rewatches count; watchlist-only films do not.`}
         </p>
       </div>
       <div className="panel taste-facts">
@@ -1437,29 +1626,60 @@ function FilmInsightsPanel({
           ))}
         </div>
       </div>
-      <div className="panel viewing-rhythm">
-        <div className="panel-title">
-          <Clock3 size={18} />
-          <h2>{language === "tr" ? "Izleme yogunlugu" : "Viewing rhythm"}</h2>
-        </div>
-        <MiniBars
-          data={insights.monthlyActivity}
-          empty={language === "tr" ? "Diary tarih verisi yok" : "No diary dates"}
-        />
-        <div className="weekday-row">
-          {insights.weekdayActivity.map((item) => (
-            <div key={item.name}>
-              <strong>{item.count}</strong>
-              <span>{item.name}</span>
-            </div>
-          ))}
-        </div>
-      </div>
     </>
   );
 }
 
-function MiniBars({ data, empty }: { data: Array<{ name: string; count: number }>; empty: string }) {
+function ViewingRhythmPanel({
+  language,
+  insights,
+}: {
+  language: Language;
+  insights: ReturnType<typeof buildFilmInsights>;
+}) {
+  return (
+    <div className="panel viewing-rhythm">
+      <div className="panel-title">
+        <Clock3 size={18} />
+        <h2>{language === "tr" ? "Izleme yogunlugu" : "Viewing rhythm"}</h2>
+      </div>
+      <MiniBars
+        data={insights.monthlyActivity}
+        empty={language === "tr" ? "Diary tarih verisi yok" : "No diary dates"}
+      />
+      <h3>{language === "tr" ? "Aylara gore film dagilimi" : "Films by month"}</h3>
+      <MiniBars
+        data={insights.monthOfYearActivity}
+        compactLabels
+        empty={language === "tr" ? "Diary tarih verisi yok" : "No diary dates"}
+      />
+      {insights.yearlyActivity.length > 0 && (
+        <>
+          <h3>{language === "tr" ? "Yillara gore" : "By year"}</h3>
+          <MiniBars data={insights.yearlyActivity} compactLabels empty="" />
+        </>
+      )}
+      <div className="weekday-row">
+        {insights.weekdayActivity.map((item) => (
+          <div key={item.name}>
+            <strong>{item.count}</strong>
+            <span>{item.name}</span>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function MiniBars({
+  data,
+  empty,
+  compactLabels = false,
+}: {
+  data: Array<{ name: string; count: number }>;
+  empty: string;
+  compactLabels?: boolean;
+}) {
   if (!data.length) return <p className="muted-line">{empty}</p>;
   const max = Math.max(...data.map((item) => item.count), 1);
   return (
@@ -1467,7 +1687,7 @@ function MiniBars({ data, empty }: { data: Array<{ name: string; count: number }
       {data.map((item) => (
         <div key={item.name} title={`${item.name}: ${item.count}`}>
           <span style={{ height: `${Math.max(5, (item.count / max) * 100)}%` }} />
-          <small>{item.name.slice(5)}</small>
+          <small>{compactLabels ? item.name : item.name.slice(5)}</small>
         </div>
       ))}
     </div>
@@ -1616,6 +1836,12 @@ function SocialPanel({
           <p className="muted-line">
             {language === "tr" ? "Son basarili tarama" : "Last successful scan"}: {new Date(data.checkedAt).toLocaleString(language === "tr" ? "tr-TR" : "en-US")}
           </p>
+          <p className="live-bridge-note">
+            <span />
+            {language === "tr"
+              ? `Canli baglanti acik. TasteTwin ile yaptigin son tiklamalar 2 saniye icinde yansir${data.liveUpdatedAt ? ` · son guncelleme ${new Date(data.liveUpdatedAt).toLocaleTimeString("tr-TR")}` : ""}.`
+              : `Live bridge on. Final clicks made through TasteTwin appear within 2 seconds${data.liveUpdatedAt ? ` · last update ${new Date(data.liveUpdatedAt).toLocaleTimeString("en-US")}` : ""}.`}
+          </p>
         </div>
         <button className="primary-button" onClick={onUseFollowing} disabled={loading}>
           {loading ? <Loader2 className="spin" size={18} /> : <Search size={18} />}
@@ -1745,6 +1971,7 @@ function SocialDirectory({
   const [followsMe, setFollowsMe] = useState<RelationshipFilter>("any");
   const [source, setSource] = useState<"all" | "direct" | "network">("all");
   const [activity, setActivity] = useState<"any" | "known" | "unknown">("any");
+  const [activityAge, setActivityAge] = useState<SocialDirectoryFilters["activityAge"]>("any");
   const [category, setCategory] = useState<SocialDirectoryFilters["category"]>("all");
   const [minTaste, setMinTaste] = useState(0);
   const [maxTaste, setMaxTaste] = useState(100);
@@ -1755,6 +1982,12 @@ function SocialDirectory({
   const [sort, setSort] = useState<SocialDirectorySort>("relationship");
   const [pageSize, setPageSize] = useState(100);
   const [page, setPage] = useState(1);
+  const [manageAction, setManageAction] = useState<"unfollow" | "follow">("unfollow");
+  const [reviewOpen, setReviewOpen] = useState(false);
+  const [selectedHandles, setSelectedHandles] = useState<Set<string>>(() => new Set());
+  const [managementQueues, setManagementQueues] = useState<SocialManagementQueues>(() =>
+    loadSocialManagementQueues(data.handle),
+  );
   const directory = useMemo(
     () => buildSocialDirectory({
       following: data.following,
@@ -1772,6 +2005,7 @@ function SocialDirectory({
       followsMe,
       source,
       activity,
+      activityAge,
       category,
       minTaste,
       maxTaste,
@@ -1781,16 +2015,33 @@ function SocialDirectory({
       maxConnections: maxDirectoryConnections,
       sort,
     }),
-    [activity, category, directory, followsMe, maxDirectoryActivity, maxDirectoryConnections, maxTaste, minDirectoryActivity, minDirectoryConnections, minTaste, myFollow, query, sort, source],
+    [activity, activityAge, category, directory, followsMe, maxDirectoryActivity, maxDirectoryConnections, maxTaste, minDirectoryActivity, minDirectoryConnections, minTaste, myFollow, query, sort, source],
   );
   const pagination = useMemo(
     () => paginateSocialDirectory(filtered, page, pageSize),
     [filtered, page, pageSize],
   );
+  const eligibleFiltered = useMemo(
+    () => filtered.filter((entry) => manageAction === "unfollow" ? entry.myFollow : !entry.myFollow),
+    [filtered, manageAction],
+  );
+  const queuedEntries = useMemo(() => {
+    const handles = new Set(managementQueues[manageAction]);
+    return directory.filter((entry) => handles.has(entry.username.toLowerCase()));
+  }, [directory, managementQueues, manageAction]);
 
   useEffect(() => {
     setPage(1);
-  }, [activity, category, followsMe, maxDirectoryActivity, maxDirectoryConnections, maxTaste, minDirectoryActivity, minDirectoryConnections, minTaste, myFollow, pageSize, query, sort, source]);
+  }, [activity, activityAge, category, followsMe, maxDirectoryActivity, maxDirectoryConnections, maxTaste, minDirectoryActivity, minDirectoryConnections, minTaste, myFollow, pageSize, query, sort, source]);
+
+  useEffect(() => {
+    setManagementQueues(loadSocialManagementQueues(data.handle));
+    setSelectedHandles(new Set());
+  }, [data.handle]);
+
+  useEffect(() => {
+    localStorage.setItem(`tastetwin.socialQueues.${data.handle}`, JSON.stringify(managementQueues));
+  }, [data.handle, managementQueues]);
 
   const activityKnown = filtered.filter((entry) => entry.activity?.lastActivityAt).length;
   const missingActivity = directory.filter((entry) => !entry.activity?.lastActivityAt);
@@ -1880,6 +2131,19 @@ function SocialDirectory({
           ]}
         />
         <DirectorySelect
+          label={language === "tr" ? "Son aktiflik" : "Last activity"}
+          value={activityAge}
+          onChange={(value) => setActivityAge(value as SocialDirectoryFilters["activityAge"])}
+          options={[
+            ["any", language === "tr" ? "Fark etmez" : "Any"],
+            ["active30", language === "tr" ? "Son 30 gunde aktif" : "Active in 30 days"],
+            ["active90", language === "tr" ? "Son 90 gunde aktif" : "Active in 90 days"],
+            ["inactive90", language === "tr" ? "90+ gun pasif" : "Inactive 90+ days"],
+            ["inactive180", language === "tr" ? "180+ gun pasif" : "Inactive 180+ days"],
+            ["inactive365", language === "tr" ? "365+ gun pasif" : "Inactive 365+ days"],
+          ]}
+        />
+        <DirectorySelect
           label={language === "tr" ? "En az zevk puani" : "Minimum taste"}
           value={String(minTaste)}
           onChange={(value) => setMinTaste(Number(value))}
@@ -1934,6 +2198,15 @@ function SocialDirectory({
           onChange={(value) => setPageSize(Number(value))}
           options={[50, 100, 250].map((size) => [String(size), String(size)])}
         />
+        <DirectorySelect
+          label={language === "tr" ? "Filtrelenmis liste islemi" : "Filtered list action"}
+          value={manageAction}
+          onChange={(value) => setManageAction(value as typeof manageAction)}
+          options={[
+            ["unfollow", language === "tr" ? "Takipten cikacaklar" : "Unfollow review"],
+            ["follow", language === "tr" ? "Takip edilecekler" : "Follow review"],
+          ]}
+        />
       </div>
       <div className="directory-summary">
         <span>
@@ -1964,8 +2237,110 @@ function SocialDirectory({
           </span>
         </div>
       )}
-      <SocialActionWorkbench language={language} directory={directory} />
-      <SocialDirectoryList entries={pagination.items} language={language} onSelectMatch={onSelectMatch} />
+      <div className="directory-manage-bar">
+        <div>
+          <strong>
+            {manageAction === "unfollow"
+              ? language === "tr"
+                ? "Takipten cikma incelemesi"
+                : "Unfollow review"
+              : language === "tr"
+                ? "Takip etme incelemesi"
+                : "Follow review"}
+          </strong>
+          <span>
+            {language === "tr"
+              ? "Yukaridaki normal arama ve filtreler aynen bu listeye uygulanir."
+              : "The search and filters above are applied to this review list."}
+          </span>
+        </div>
+        <div className="selection-actions">
+          <button
+            className="browser-scan-button"
+            disabled={!eligibleFiltered.length}
+            onClick={() => setSelectedHandles(new Set(eligibleFiltered.map((entry) => entry.username.toLowerCase())))}
+          >
+            <UserCheck size={16} />
+            {language === "tr"
+              ? `Bu kriterlerdeki herkesi sec (${eligibleFiltered.length})`
+              : `Select everyone matching (${eligibleFiltered.length})`}
+          </button>
+          <button
+            className="browser-scan-button"
+            disabled={!selectedHandles.size}
+            onClick={() => setSelectedHandles(new Set())}
+          >
+            <X size={16} />
+            {language === "tr" ? "Secimi temizle" : "Clear selection"}
+          </button>
+          <button
+            className="primary-button"
+            disabled={!selectedHandles.size}
+            onClick={() => {
+              setManagementQueues((current) => ({
+                ...current,
+                [manageAction]: [...new Set([...current[manageAction], ...selectedHandles])],
+              }));
+              setReviewOpen(true);
+            }}
+          >
+            {manageAction === "unfollow" ? <UserMinus size={16} /> : <UserCheck size={16} />}
+            {language === "tr"
+              ? `Secilen ${selectedHandles.size} kisiyi listeye ekle`
+              : `Add ${selectedHandles.size} selected`}
+          </button>
+        </div>
+      </div>
+      <div className="queue-tabs">
+        <button
+          className={manageAction === "unfollow" ? "active" : ""}
+          onClick={() => {
+            setManageAction("unfollow");
+            setReviewOpen(true);
+          }}
+        >
+          <UserMinus size={16} />
+          {language === "tr" ? "Takipten cikilacaklar" : "Unfollow list"} <strong>{managementQueues.unfollow.length}</strong>
+        </button>
+        <button
+          className={manageAction === "follow" ? "active" : ""}
+          onClick={() => {
+            setManageAction("follow");
+            setReviewOpen(true);
+          }}
+        >
+          <UserCheck size={16} />
+          {language === "tr" ? "Takip edilecekler" : "Follow list"} <strong>{managementQueues.follow.length}</strong>
+        </button>
+      </div>
+      {reviewOpen && (
+        <SocialReviewQueue
+          language={language}
+          entries={queuedEntries}
+          action={manageAction}
+          onRemove={(handle) =>
+            setManagementQueues((current) => ({
+              ...current,
+              [manageAction]: current[manageAction].filter((item) => item !== handle.toLowerCase()),
+            }))
+          }
+          onClear={() => setManagementQueues((current) => ({ ...current, [manageAction]: [] }))}
+        />
+      )}
+      <SocialDirectoryList
+        entries={pagination.items}
+        language={language}
+        onSelectMatch={onSelectMatch}
+        selectedHandles={selectedHandles}
+        onToggleSelection={(handle) =>
+          setSelectedHandles((current) => {
+            const next = new Set(current);
+            if (next.has(handle)) next.delete(handle);
+            else next.add(handle);
+            return next;
+          })
+        }
+      />
       {filtered.length > 0 && (
         <nav className="match-pagination directory-pagination">
           <button disabled={pagination.page <= 1} onClick={() => setPage((current) => Math.max(1, current - 1))}>
@@ -1989,133 +2364,104 @@ function SocialDirectory({
   );
 }
 
-function SocialActionWorkbench({
+function SocialReviewQueue({
   language,
-  directory,
+  entries,
+  action,
+  onRemove,
+  onClear,
 }: {
   language: Language;
-  directory: SocialDirectoryEntry[];
+  entries: SocialDirectoryEntry[];
+  action: "follow" | "unfollow";
+  onRemove: (handle: string) => void;
+  onClear: () => void;
 }) {
-  const [rule, setRule] = useState<SocialActionRule>({
-    action: "unfollow",
-    inactiveDays: 180,
-    minTaste: 0,
-    maxTaste: 55,
-    minActivity: 0,
-    maxActivity: 35,
-    followsMe: "any",
-  });
-  const [expanded, setExpanded] = useState(false);
-  const candidates = useMemo(() => buildSocialActionCandidates(directory, rule), [directory, rule]);
+  const [queuePage, setQueuePage] = useState(1);
+  const pageSize = 120;
+  const totalPages = Math.max(1, Math.ceil(entries.length / pageSize));
+  const pending = entries.slice((queuePage - 1) * pageSize, queuePage * pageSize);
 
-  function setAction(action: SocialAction) {
-    setRule(
-      action === "unfollow"
-        ? { action, inactiveDays: 180, minTaste: 0, maxTaste: 55, minActivity: 0, maxActivity: 35, followsMe: "any" }
-        : { action, inactiveDays: 0, minTaste: 70, maxTaste: 100, minActivity: 50, maxActivity: 100, followsMe: "any" },
-    );
-  }
+  useEffect(() => {
+    setQueuePage((current) => Math.min(current, totalPages));
+  }, [totalPages]);
 
-  async function copyCandidates() {
-    await navigator.clipboard.writeText(candidates.map(({ entry }) => `@${entry.username}`).join("\n"));
+  async function openForReview(entry: SocialDirectoryEntry) {
+    try {
+      await fetch("/api/extension/request-manage", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "X-TasteTwin-Request": "app" },
+        body: JSON.stringify({ handle: entry.username, action }),
+      });
+    } catch {
+      // The profile still opens even if the extension guidance is unavailable.
+    }
+    window.open(`https://letterboxd.com/${encodeURIComponent(entry.username)}/`, "_blank", "noopener,noreferrer");
   }
 
   return (
-    <div className="social-action-workbench" data-testid="social-action-workbench">
-      <button className="workbench-summary" onClick={() => setExpanded((value) => !value)} aria-expanded={expanded}>
-        <Filter size={17} />
-        <span>{language === "tr" ? "Takip islem kurallari" : "Follow action rules"}</span>
-        <strong>{candidates.length}</strong>
-        <ArrowRight className={expanded ? "rotate" : ""} size={17} />
-      </button>
-      {expanded && (
-        <div className="workbench-body">
-          <p>
+    <div className="social-review-queue" data-testid="social-review-queue">
+      <div className="queue-header">
+        <div>
+          <strong>
             {language === "tr"
-              ? "Kurallar yalnizca aday listesi uretir. Letterboxd toplu otomasyonu ve asiri takip davranisini kisitladigi icin hesap degisikligi otomatik yapilmaz."
-              : "Rules only create a review queue. Letterboxd restricts bulk automation and excessive following, so account changes are never executed automatically."}
-          </p>
-          <div className="workbench-controls">
-            <DirectorySelect
-              label={language === "tr" ? "Islem" : "Action"}
-              value={rule.action}
-              onChange={(value) => setAction(value as SocialAction)}
-              options={[
-                ["unfollow", language === "tr" ? "Takipten cik adayi" : "Unfollow candidate"],
-                ["follow", language === "tr" ? "Takip et adayi" : "Follow candidate"],
-              ]}
-            />
-            <DirectorySelect
-              label={language === "tr" ? "Pasiflik" : "Inactivity"}
-              value={String(rule.inactiveDays)}
-              onChange={(value) => setRule((current) => ({ ...current, inactiveDays: Number(value) }))}
-              options={[0, 30, 90, 180, 365].map((days) => [
-                String(days),
-                days ? `${days}+ ${language === "tr" ? "gun" : "days"}` : language === "tr" ? "Fark etmez" : "Any",
-              ])}
-            />
-            <DirectorySelect
-              label={language === "tr" ? "En az zevk" : "Minimum taste"}
-              value={String(rule.minTaste)}
-              onChange={(value) => setRule((current) => ({ ...current, minTaste: Number(value) }))}
-              options={[0, 40, 50, 60, 70, 80].map((score) => [String(score), score ? `${score}+` : language === "tr" ? "Fark etmez" : "Any"])}
-            />
-            <DirectorySelect
-              label={language === "tr" ? "En cok zevk" : "Maximum taste"}
-              value={String(rule.maxTaste)}
-              onChange={(value) => setRule((current) => ({ ...current, maxTaste: Number(value) }))}
-              options={[40, 50, 55, 60, 70, 100].map((score) => [String(score), score === 100 ? language === "tr" ? "Fark etmez" : "Any" : String(score)])}
-            />
-            <DirectorySelect
-              label={language === "tr" ? "Beni takip ediyor" : "Follows me"}
-              value={rule.followsMe}
-              onChange={(value) => setRule((current) => ({ ...current, followsMe: value as SocialActionRule["followsMe"] }))}
-              options={relationshipOptions(language)}
-            />
-            <DirectorySelect
-              label={language === "tr" ? "Minimum aktiflik" : "Minimum activity"}
-              value={String(rule.minActivity)}
-              onChange={(value) => setRule((current) => ({ ...current, minActivity: Number(value) }))}
-              options={[0, 10, 25, 40, 60, 80].map((score) => [String(score), score ? `${score}+` : language === "tr" ? "Fark etmez" : "Any"])}
-            />
-            <DirectorySelect
-              label={language === "tr" ? "Maksimum aktiflik" : "Maximum activity"}
-              value={String(rule.maxActivity)}
-              onChange={(value) => setRule((current) => ({ ...current, maxActivity: Number(value) }))}
-              options={[10, 25, 35, 50, 70, 100].map((score) => [String(score), score === 100 ? language === "tr" ? "Fark etmez" : "Any" : String(score)])}
-            />
-          </div>
-          <div className="queue-header">
-            <span>
-              {language === "tr"
-                ? `${candidates.length} aday bulundu; en fazla ilk 25 gosteriliyor.`
-                : `${candidates.length} candidates; showing up to 25.`}
-            </span>
-            <button className="secondary-button" disabled={!candidates.length} onClick={copyCandidates}>
-              <Copy size={15} />
-              {language === "tr" ? "Kullanicilari kopyala" : "Copy handles"}
-            </button>
-          </div>
-          <ul className="action-queue">
-            {candidates.slice(0, 25).map(({ entry, reasons }) => (
-              <li key={entry.username}>
-                <Avatar name={entry.displayName} src={entry.avatarUrl} />
-                <div>
-                  <strong>{entry.displayName}</strong>
-                  <span>@{entry.username} · {reasons.join(" · ")}</span>
-                </div>
-                <a
-                  href={`https://letterboxd.com/${entry.username}/`}
-                  target="_blank"
-                  rel="noreferrer"
-                  title={language === "tr" ? "Profili ac ve islemi onayla" : "Open profile and confirm"}
-                >
-                  <ExternalLink size={17} />
-                </a>
-              </li>
-            ))}
-          </ul>
+              ? `${entries.length} kisi listede · sayfa ${queuePage}/${totalPages}`
+              : `${entries.length} people queued · page ${queuePage}/${totalPages}`}
+          </strong>
+          <span>
+            {language === "tr"
+              ? "Yonet dugmesi profili acar; guncel eklenti Letterboxd takip dugmesini bulup vurgular. Son tiklama sende kalir."
+              : "Manage opens the profile; the current extension highlights Letterboxd's follow control. The final click stays with you."}
+          </span>
         </div>
+        <div className="queue-header-actions">
+          <button className="browser-scan-button" disabled={!entries.length} onClick={onClear}>
+            <X size={16} />
+            {language === "tr" ? "Listeyi temizle" : "Clear list"}
+          </button>
+          <button className="primary-button" disabled={!pending.length} onClick={() => pending[0] && openForReview(pending[0])}>
+            <ExternalLink size={16} />
+            {language === "tr" ? "Siradaki profili ac" : "Open next profile"}
+          </button>
+        </div>
+      </div>
+      <ul className="action-queue dense-action-queue">
+        {pending.map((entry) => (
+          <li key={entry.username}>
+            <Avatar name={entry.displayName} src={entry.avatarUrl} />
+            <div>
+              <strong>{entry.displayName}</strong>
+              <span>
+                @{entry.username}
+                {entry.match ? ` · zevk ${entry.match.score}` : ""}
+                {entry.activity?.activityScore !== undefined ? ` · aktiflik ${entry.activity.activityScore}` : ""}
+                {entry.activity?.lastActivityAt ? ` · ${formatActivity(entry.activity, language)}` : ""}
+              </span>
+            </div>
+            <button
+              className="queue-skip"
+              onClick={() => onRemove(entry.username)}
+              title={language === "tr" ? "Listeden cikar" : "Remove from list"}
+            >
+              <X size={16} />
+            </button>
+            <button className="queue-manage" onClick={() => openForReview(entry)}>
+              <ExternalLink size={16} />
+              <span>{language === "tr" ? "Yonet" : "Manage"}</span>
+            </button>
+          </li>
+        ))}
+      </ul>
+      {entries.length > pageSize && (
+        <nav className="match-pagination directory-pagination">
+          <button disabled={queuePage <= 1} onClick={() => setQueuePage((value) => Math.max(1, value - 1))}>
+            <ArrowLeft size={16} /> {language === "tr" ? "Onceki" : "Previous"}
+          </button>
+          <span>{queuePage}/{totalPages}</span>
+          <button disabled={queuePage >= totalPages} onClick={() => setQueuePage((value) => Math.min(totalPages, value + 1))}>
+            {language === "tr" ? "Sonraki" : "Next"} <ArrowRight size={16} />
+          </button>
+        </nav>
       )}
     </div>
   );
@@ -2125,16 +2471,27 @@ function SocialDirectoryList({
   entries,
   language,
   onSelectMatch,
+  selectedHandles,
+  onToggleSelection,
 }: {
   entries: SocialDirectoryEntry[];
   language: Language;
   onSelectMatch: (match: MatchResult) => void;
+  selectedHandles: Set<string>;
+  onToggleSelection: (handle: string) => void;
 }) {
   if (!entries.length) return <p className="empty-state">0</p>;
   return (
     <ul className="social-directory-list">
       {entries.map((entry) => (
         <li key={entry.username}>
+          <input
+            className="directory-select-checkbox"
+            type="checkbox"
+            checked={selectedHandles.has(entry.username.toLowerCase())}
+            onChange={() => onToggleSelection(entry.username.toLowerCase())}
+            aria-label={language === "tr" ? `${entry.displayName} sec` : `Select ${entry.displayName}`}
+          />
           <Avatar name={entry.displayName} src={entry.avatarUrl} />
           <div className="directory-person">
             <strong>{entry.displayName}</strong>
@@ -2771,6 +3128,23 @@ function reasonLines(match: MatchResult, language: Language) {
 
 type AvailableSocialData = Extract<SocialData, { available: true }>;
 
+type SocialManagementQueues = {
+  follow: string[];
+  unfollow: string[];
+};
+
+function loadSocialManagementQueues(handle: string): SocialManagementQueues {
+  try {
+    const saved = JSON.parse(localStorage.getItem(`tastetwin.socialQueues.${handle}`) ?? "null");
+    return {
+      follow: Array.isArray(saved?.follow) ? saved.follow.filter((item: unknown) => typeof item === "string") : [],
+      unfollow: Array.isArray(saved?.unfollow) ? saved.unfollow.filter((item: unknown) => typeof item === "string") : [],
+    };
+  } catch {
+    return { follow: [], unfollow: [] };
+  }
+}
+
 function buildBrowserScannerBookmarklet() {
   return `javascript:(async()=>{try{if(!location.hostname.endsWith('letterboxd.com'))throw Error('Open your Letterboxd profile first');const h=location.pathname.split('/').filter(Boolean)[0];if(!h)throw Error('Profile not found');const w=open('http://127.0.0.1:5173/?bridge=1','tastetwin');const scan=async k=>{let u='/' + h + '/' + k + '/',a=[];while(u){const r=await fetch(u,{credentials:'include'});if(!r.ok)throw Error(k+' page failed: '+r.status);const d=new DOMParser().parseFromString(await r.text(),'text/html');a.push(...[...d.querySelectorAll('.person-summary')].map(x=>{const n=x.querySelector('a.name'),i=x.querySelector('img');const p=n?.getAttribute('href')?.split('/').filter(Boolean)[0];return p?{username:p,displayName:n.textContent.trim()||p,avatarUrl:i?.src}:null}).filter(Boolean));u=d.querySelector('.pagination a.next,.paginate-nextprev a.next')?.getAttribute('href')||''}return a};const [following,followers]=await Promise.all([scan('following'),scan('followers')]);await new Promise(r=>setTimeout(r,1600));w.postMessage({type:'TASTETWIN_SOCIAL',handle:h,following,followers},'http://127.0.0.1:5173');w.focus()}catch(e){alert('TasteTwin: '+e.message)}})()`;
 }
@@ -2809,6 +3183,41 @@ function socialFromBrowserMessage(value: unknown): AvailableSocialData | undefin
     fans,
     lostFollowers: [],
     newFollowers: [],
+  };
+}
+
+function applyRelationshipEvent(
+  data: AvailableSocialData,
+  rawHandle: unknown,
+  action: unknown,
+): AvailableSocialData {
+  const handle = String(rawHandle ?? "").toLowerCase();
+  if (!/^[a-z0-9_-]{2,32}$/.test(handle) || (action !== "follow" && action !== "unfollow")) return data;
+  const known = [...data.following, ...data.followers, ...(data.networkCandidates ?? [])]
+    .find((member) => member.username.toLowerCase() === handle);
+  const member = known ?? { username: handle, displayName: handle };
+  const following = action === "follow"
+    ? [...data.following.filter((item) => item.username.toLowerCase() !== handle), member]
+    : data.following.filter((item) => item.username.toLowerCase() !== handle);
+  const followingNames = new Set(following.map((item) => item.username.toLowerCase()));
+  const followerNames = new Set(data.followers.map((item) => item.username.toLowerCase()));
+  const mutuals = following.filter((item) => followerNames.has(item.username.toLowerCase()));
+  const notFollowingBack = following.filter((item) => !followerNames.has(item.username.toLowerCase()));
+  const fans = data.followers.filter((item) => !followingNames.has(item.username.toLowerCase()));
+  return {
+    ...data,
+    liveUpdatedAt: new Date().toISOString(),
+    following,
+    mutuals,
+    notFollowingBack,
+    fans,
+    counts: {
+      ...data.counts,
+      following: following.length,
+      mutuals: mutuals.length,
+      notFollowingBack: notFollowingBack.length,
+      fans: fans.length,
+    },
   };
 }
 

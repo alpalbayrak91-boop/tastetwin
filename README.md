@@ -14,7 +14,8 @@ TasteTwin is a local-first Letterboxd social graph and movie taste matching app.
 - Opens each match into a rated common-film and divergence breakdown.
 - Combines social and two-hop network scanning in one extension action while saving the social stage first.
 - Provides numeric filters, sorting, pagination, weighted mutual connections, and recent film-activity signals.
-- Builds a review-only follow/unfollow candidate queue from relationship, inactivity, activity, taste, and mutual-link rules.
+- Selects everyone matching the current social filters and saves them into separate follow/unfollow review lists.
+- Shows up to 120 compact review entries per page; the extension highlights the real Letterboxd control and the user makes the final click.
 - Excludes watchlist and unrated entries from co-rated match evidence.
 - Uses a separate validity percentage based on the number of co-rated films.
 - Shows total viewing time, average rating, viewing rhythm, and top genres, directors, actors, and languages.
@@ -44,7 +45,9 @@ The current scoring model, social-data limits, TMDB recommendation plan, and kno
 
 Optional TMDB enrichment accepts the user's local API Read Access Token and adds runtime, cast, directors, genres, language, synopsis, recommendations, keywords, countries, and posters. It enriches the full watched/watchlist archive so personal statistics are not based on a small favorite-only sample. The TMDB token is stored only in local app storage.
 
-TasteTwin does not automatically follow or unfollow accounts. Letterboxd restricts automated extraction and excessive following, so social rules produce a transparent review queue with profile links instead.
+TasteTwin does not automatically follow or unfollow accounts. Letterboxd restricts automated extraction and excessive following, so social filters produce a transparent review queue. The companion extension opens the selected profile, scrolls to Letterboxd's relationship control and highlights it; the user makes the final click.
+
+When that highlighted control is clicked, the extension reports the completed action to the local desktop bridge. The open app updates its following state within about two seconds. This is not remote account monitoring: changes made outside the TasteTwin-assisted flow are discovered by the next full scan.
 
 For a public or revenue-generating release, asking every user to enter a personal TMDB key does not by itself settle licensing. Review TMDB's current terms and attribution requirements before release.
 

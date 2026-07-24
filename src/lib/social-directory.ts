@@ -35,6 +35,7 @@ export type SocialDirectoryFilters = {
   followsMe: "any" | "yes" | "no";
   source: "all" | "direct" | "network";
   activity: "any" | "known" | "unknown";
+  activityAge: "any" | "active30" | "active90" | "inactive90" | "inactive180" | "inactive365";
   category:
     | "all"
     | "following"
@@ -133,6 +134,7 @@ export function filterAndSortSocialDirectory(
           (filters.source === "direct" ? direct : entry.inNetwork && !direct)) &&
         (filters.activity === "any" ||
           (filters.activity === "known" ? Boolean(entry.activity?.lastActivityAt) : !entry.activity?.lastActivityAt)) &&
+        activityAgeMatches(filters.activityAge, entry.activity?.lastActivityAt) &&
         categoryMatches(filters.category, entry) &&
         (filters.minTaste <= 0 || (entry.match?.score ?? -1) >= filters.minTaste) &&
         (filters.maxTaste >= 100 || (entry.match?.score ?? 101) <= filters.maxTaste) &&
@@ -225,6 +227,18 @@ function categoryMatches(
 
 function relationshipMatches(filter: "any" | "yes" | "no", value: boolean) {
   return filter === "any" || (filter === "yes" ? value : !value);
+}
+
+function activityAgeMatches(filter: SocialDirectoryFilters["activityAge"], value?: string) {
+  if (filter === "any") return true;
+  const timestamp = Date.parse(value ?? "");
+  if (!timestamp) return false;
+  const ageDays = (Date.now() - timestamp) / 86_400_000;
+  if (filter === "active30") return ageDays <= 30;
+  if (filter === "active90") return ageDays <= 90;
+  if (filter === "inactive90") return ageDays >= 90;
+  if (filter === "inactive180") return ageDays >= 180;
+  return ageDays >= 365;
 }
 
 function keyOf(member: SocialMemberRecord) {

@@ -30,10 +30,13 @@ const socialCache = new Map();
 const bridgeCache = new Map();
 const tmdbCache = new Map();
 let pendingExtensionScan;
+let pendingManageAction;
+const relationshipEvents = [];
 const SOCIAL_CACHE_MS = 5 * 60 * 1000;
 const BRIDGE_CACHE_MS = 30 * 24 * 60 * 60 * 1000;
 const PUBLIC_SOCIAL_PAGE_LIMIT = 8;
 const PENDING_SCAN_MS = 15 * 60 * 1000;
+const PENDING_MANAGE_MS = 10 * 60 * 1000;
 
 await Promise.all([restoreBridgeCache(), restoreTmdbCache()]);
 
@@ -73,6 +76,71 @@ const server = createServer(async (req, res) => {
           : undefined;
       if (pending) pendingExtensionScan = undefined;
       sendJson(res, 200, pending ? { pending: true, mode: pending.mode, requestedAt: pending.requestedAt } : { pending: false });
+      return;
+    }
+
+    if (url.pathname === "/api/extension/request-manage" && req.method === "POST") {
+      if (req.headers["x-tastetwin-request"] !== "app") {
+        sendJson(res, 403, { error: "app_request_required" });
+        return;
+      }
+      const body = await readJsonBody(req);
+      const handle = String(body.handle ?? "").trim().replace(/^@/, "").toLowerCase();
+      const action = body.action === "follow" ? "follow" : body.action === "unfollow" ? "unfollow" : "";
+      if (!/^[a-z0-9_-]{2,32}$/.test(handle) || !action) {
+        sendJson(res, 400, { error: "invalid_manage_request" });
+        return;
+      }
+      pendingManageAction = {
+        handle,
+        action,
+        requestedAt: new Date().toISOString(),
+        expiresAt: Date.now() + PENDING_MANAGE_MS,
+      };
+      sendJson(res, 200, { ok: true, ...pendingManageAction });
+      return;
+    }
+
+    if (url.pathname === "/api/extension/claim-manage" && req.method === "POST") {
+      const body = await readJsonBody(req);
+      const handle = String(body.handle ?? "").trim().replace(/^@/, "").toLowerCase();
+      const pending =
+        pendingManageAction &&
+        pendingManageAction.expiresAt > Date.now() &&
+        pendingManageAction.handle === handle
+          ? pendingManageAction
+          : undefined;
+      if (pending) pendingManageAction = undefined;
+      sendJson(res, 200, pending ? { pending: true, action: pending.action } : { pending: false });
+      return;
+    }
+
+    if (url.pathname === "/api/letterboxd/relationship-event" && req.method === "POST") {
+      const body = await readJsonBody(req);
+      const handle = String(body.handle ?? "").trim().replace(/^@/, "").toLowerCase();
+      const action = body.action === "follow" ? "follow" : body.action === "unfollow" ? "unfollow" : "";
+      if (!/^[a-z0-9_-]{2,32}$/.test(handle) || !action) {
+        sendJson(res, 400, { error: "invalid_relationship_event" });
+        return;
+      }
+      const event = {
+        id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+        handle,
+        action,
+        occurredAt: new Date().toISOString(),
+      };
+      relationshipEvents.push(event);
+      if (relationshipEvents.length > 500) relationshipEvents.splice(0, relationshipEvents.length - 500);
+      sendJson(res, 200, { ok: true, event });
+      return;
+    }
+
+    if (url.pathname === "/api/letterboxd/relationship-events" && req.method === "GET") {
+      const since = Date.parse(url.searchParams.get("since") ?? "");
+      const events = Number.isFinite(since)
+        ? relationshipEvents.filter((event) => Date.parse(event.occurredAt) > since)
+        : relationshipEvents.slice(-50);
+      sendJson(res, 200, { events });
       return;
     }
 

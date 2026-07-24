@@ -104,3 +104,29 @@ Letterboxd Aralik 2025 kullanim kosullari otomatik veri toplama araclarini ve ka
 - Siradaki film araci sadece izlenmemis watchlist girdilerinden zevk uyumlu, kisa veya rastgele secim yapar.
 - Sosyal dizinde zevk, aktiflik ve ortak baglanti icin minimum/maksimum filtreleri vardir.
 - Takip et/takipten cik aday kuyrugu ayrintili kurallarla olusur; otomatik hesap islemi yapmaz.
+
+# 0.3.1 - Duzenli film paneli ve kolay sosyal inceleme
+
+- Film paneli Genel bakis, Istatistikler, Izleme gecmisi ve Ne izlesem olarak dort tiklanabilir bolume ayrildi.
+- Veri kapsami satiri izlenmis film, tarihli diary kaydi, TMDB metadata ve sure sayilarini eksiksiz adetlerle gosterir.
+- Eksik metadata, film panelinden tek dugmeyle TMDB zenginlestirmesine gonderilir.
+- Sosyal takip islemleri ayri bir kural formu kullanmaz; normal sosyal arama ve tum ayrintili filtrelerin sonucunu kullanir.
+- Son aktiflik icin son 30/90 gunde aktif ve 90/180/365+ gun pasif secenekleri eklendi.
+- Kolay yonetim kuyrugu siradaki profili acar, atlananlari yerel oturumda isaretler ve ilk 100 adayi gosterir.
+- Chrome eklentisi 0.2.1 secilen Letterboxd profilinde takip dugmesini bulur, ekrana getirir ve vurgular; son tiklamayi kullanici yapar.
+
+# 0.3.2 - Kalici yonetim listeleri ve canli yerel kopru
+
+- Normal sosyal filtre sonucundaki uygun hesaplar tek tusla secilebilir; tek tek secim kutulari da vardir.
+- Secilen hesaplar kalici Takip edilecekler veya Takipten cikilacaklar listesine eklenir.
+- Yonetim listeleri uygulama yeniden acildiginda korunur ve performans icin sayfa basina 120 yogun satir gosterir.
+- Son tiklama yine kullanicidadir. TasteTwin'in vurguladigi Letterboxd dugmesine basildiginda eklenti islemi yerel uygulamaya bildirir ve sosyal sayilar yaklasik iki saniyede guncellenir.
+- Canli kopru yalniz TasteTwin uzerinden acilan/vurgulanan islemleri bilir; disarida yapilan degisiklikler sonraki tam taramada bulunur.
+- Film paneli kesin toplam dakikayi, son 12 aylik akisi, takvim aylarina gore toplami ve yillik dagilimi gosterir.
+- Sure ve aylik dagilim export diary tarihleri ile TMDB sure kapsamina baglidir; eksik filmler veri kapsami satirinda acikca sayilir.
+
+## Benzer urunlerden alinan dersler
+
+- Letterboxd Pro istatistikleri saat, ulke/dil, donem, oyuncu ve yonetmen kapsaminda guclu bir referanstir.
+- Toolboxd rastgele watchlist secimi, oneriler, benzer film/kullanici ve iki kisi karsilastirmasini tek arac kutusunda sunar.
+- TasteTwin'in ayirt edici alani tam sosyal dizin, takip gecmisi, aktiflik ve zevk sinyallerini ayni filtrelenebilir yonetim ekraninda birlestirmektir.

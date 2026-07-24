@@ -11,6 +11,9 @@ export type FilmInsights = {
   ratedFilms: number;
   averageRating: number;
   totalRuntimeMinutes: number;
+  runtimeFilms: number;
+  metadataFilms: number;
+  diaryEntries: number;
   runtimeCoverage: number;
   metadataCoverage: number;
   topGenres: RankedTerm[];
@@ -19,6 +22,8 @@ export type FilmInsights = {
   topLanguages: RankedTerm[];
   ratingDistribution: RankedTerm[];
   monthlyActivity: RankedTerm[];
+  monthOfYearActivity: RankedTerm[];
+  yearlyActivity: RankedTerm[];
   weekdayActivity: RankedTerm[];
 };
 
@@ -52,6 +57,9 @@ export function buildFilmInsights(user: UserTaste, language: "tr" | "en"): FilmI
       ? rated.reduce((sum, film) => sum + (film.rating ?? 0), 0) / rated.length
       : 0,
     totalRuntimeMinutes,
+    runtimeFilms: runtimeFilms.length,
+    metadataFilms: watched.filter((film) => film.tmdbId).length,
+    diaryEntries: dates.length,
     runtimeCoverage: watched.length ? Math.round((runtimeFilms.length / watched.length) * 100) : 0,
     metadataCoverage: watched.length
       ? Math.round(
@@ -71,6 +79,8 @@ export function buildFilmInsights(user: UserTaste, language: "tr" | "en"): FilmI
     ),
     ratingDistribution: rankRatings(rated),
     monthlyActivity: rankMonths(dates),
+    monthOfYearActivity: rankMonthOfYear(dates, language),
+    yearlyActivity: rankYears(dates),
     weekdayActivity: rankWeekdays(dates, language),
   };
 }
@@ -147,7 +157,7 @@ export function isWatched(film: FilmSignal) {
 }
 
 export function formatRuntime(totalMinutes: number, language: "tr" | "en") {
-  if (!totalMinutes) return language === "tr" ? "Veri yok" : "No data";
+  if (!totalMinutes) return language === "tr" ? "0 dk" : "0 min";
   const days = Math.floor(totalMinutes / 1440);
   const hours = Math.floor((totalMinutes % 1440) / 60);
   return days
@@ -157,6 +167,32 @@ export function formatRuntime(totalMinutes: number, language: "tr" | "en") {
     : language === "tr"
       ? `${hours} saat`
       : `${hours}h`;
+}
+
+function rankMonthOfYear(dates: string[], language: "tr" | "en"): RankedTerm[] {
+  const names = language === "tr"
+    ? ["Oca", "Sub", "Mar", "Nis", "May", "Haz", "Tem", "Agu", "Eyl", "Eki", "Kas", "Ara"]
+    : ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+  const counts = Array.from({ length: 12 }, () => 0);
+  for (const value of dates) {
+    const parsed = new Date(value);
+    if (!Number.isNaN(parsed.getTime())) counts[parsed.getMonth()] += 1;
+  }
+  return names.map((name, index) => ({ name, count: counts[index] }));
+}
+
+function rankYears(dates: string[]): RankedTerm[] {
+  const counts = new Map<string, number>();
+  for (const value of dates) {
+    const parsed = new Date(value);
+    if (Number.isNaN(parsed.getTime())) continue;
+    const year = String(parsed.getFullYear());
+    counts.set(year, (counts.get(year) ?? 0) + 1);
+  }
+  return [...counts]
+    .map(([name, count]) => ({ name, count }))
+    .sort((a, b) => a.name.localeCompare(b.name))
+    .slice(-12);
 }
 
 function viewCount(film: FilmSignal) {

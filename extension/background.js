@@ -18,6 +18,20 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     return true;
   }
 
+  if (message?.type === "claimPendingManage") {
+    claimPendingManage(message.handle)
+      .then((result) => sendResponse({ ok: true, ...result }))
+      .catch((error) => sendResponse({ ok: false, error: String(error.message ?? error) }));
+    return true;
+  }
+
+  if (message?.type === "relationshipChanged") {
+    reportRelationshipChange(message.handle, message.action)
+      .then(() => sendResponse({ ok: true }))
+      .catch((error) => sendResponse({ ok: false, error: String(error.message ?? error) }));
+    return true;
+  }
+
   if (message?.type !== "saveBridge") return;
 
   const bridgedPayload = { ...message.payload, scanStage: message.stage };
@@ -81,6 +95,28 @@ async function claimPendingScan(handle) {
   });
   const body = await response.json().catch(() => ({}));
   if (!response.ok) throw new Error(body.error ?? `TasteTwin scan claim failed: ${response.status}`);
+  return body;
+}
+
+async function claimPendingManage(handle) {
+  const response = await fetch("http://127.0.0.1:5173/api/extension/claim-manage", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ handle }),
+  });
+  const body = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error(body.error ?? `TasteTwin manage claim failed: ${response.status}`);
+  return body;
+}
+
+async function reportRelationshipChange(handle, action) {
+  const response = await fetch("http://127.0.0.1:5173/api/letterboxd/relationship-event", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ handle, action }),
+  });
+  const body = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error(body.error ?? `TasteTwin relationship update failed: ${response.status}`);
   return body;
 }
 
