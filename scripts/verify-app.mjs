@@ -1,4 +1,5 @@
 import { createRequire } from "node:module";
+import { readFile } from "node:fs/promises";
 
 const require = createRequire(import.meta.url);
 const { chromium } = require("playwright");
@@ -27,7 +28,7 @@ const rows = ["Name,Year,Rating,Letterboxd URI"];
 for (let index = 1; index <= 900; index += 1) {
   rows.push(`Film ${index},${1980 + (index % 45)},${index % 5 || 5},https://letterboxd.com/film/film-${index}/`);
 }
-await page.locator('input[type="file"]').setInputFiles({
+await page.locator('input[type="file"][accept*=".zip"]').setInputFiles({
   name: "ratings.csv",
   mimeType: "text/csv",
   buffer: Buffer.from(rows.join("\n")),
@@ -177,6 +178,21 @@ await page.reload({ waitUntil: "networkidle" });
 if ((await page.locator(".tabs button").count()) !== 2) throw new Error("The app should expose only Film and Social tabs");
 if ((await page.getByText("Paylasim karti", { exact: true }).count()) !== 0) throw new Error("Share card tab is still visible");
 if ((await page.getByText("Zevk eslesmeleri", { exact: true }).count()) !== 0) throw new Error("Separate taste-match tab is still visible");
+await page.locator(".backup-settings summary").click();
+const downloadPromise = page.waitForEvent("download");
+await page.getByRole("button", { name: "Tum yerel veriyi yedekle" }).click();
+const backupDownload = await downloadPromise;
+const backupPath = await backupDownload.path();
+const backup = JSON.parse(await readFile(backupPath, "utf8"));
+if (
+  backup.format !== "tastetwin-backup" ||
+  backup.schemaVersion !== 1 ||
+  backup.appVersion !== "0.4.0" ||
+  backup.state.users.length !== 56 ||
+  "tmdbToken" in backup
+) {
+  throw new Error("Local backup export is incomplete or leaked a token");
+}
 await page.locator(".film-data-health").waitFor();
 if (!(await page.locator(".film-data-health").innerText()).includes("film TMDB verili")) {
   throw new Error("Exact film data coverage is missing");
@@ -188,9 +204,26 @@ if (!insightText.includes("Toplam dakika") || !insightText.includes("1.045 dk") 
   throw new Error("Film history insight metrics missing");
 }
 await page.locator(".film-workspace-tabs button").filter({ hasText: "Izleme gecmisi" }).click();
-if (!(await page.locator(".viewing-rhythm").innerText()).includes("Aylara gore film dagilimi")) {
+const rhythmText = await page.locator(".viewing-rhythm").innerText();
+if (
+  !rhythmText.includes("Aylara gore film dagilimi") ||
+  !rhythmText.includes("en uzun gun serisi") ||
+  !rhythmText.includes("en yogun ay")
+) {
   throw new Error("Monthly film distribution missing");
 }
+await page.locator('[data-testid="film-archive-browser"]').waitFor();
+if ((await page.locator(".archive-row").count()) !== 50) throw new Error("Film archive pagination is not rendering 50 rows");
+await page.locator(".archive-browser-controls input").fill("Film 899");
+if (!(await page.locator('[data-testid="film-archive-browser"]').innerText()).includes("Film 899")) {
+  throw new Error("Complete film archive search failed");
+}
+await page.locator(".archive-browser-controls input").fill("");
+await page.locator(".archive-browser-controls select").first().selectOption("watchlist");
+if (!(await page.locator('[data-testid="film-archive-browser"]').innerText()).includes("Watchlist Only")) {
+  throw new Error("Unwatched watchlist archive filter failed");
+}
+await page.screenshot({ path: screenshotPath.replace(/\.png$/i, "-history.png"), fullPage: true });
 await page.locator(".film-workspace-tabs button").filter({ hasText: "Genel bakis" }).click();
 const nextWatchText = await page.locator('[data-testid="next-watch"]').innerText();
 if (!nextWatchText.includes("Watchlist Only") || !nextWatchText.includes("verified watchlist synopsis")) {
@@ -245,6 +278,14 @@ if (!(await page.locator('[data-testid="social-review-queue"]').innerText()).inc
 if (!(await page.locator(".queue-tabs").innerText()).includes("1255")) {
   throw new Error("Persistent bulk management queue count missing");
 }
+await page.request.post(new URL("/api/letterboxd/relationship-event", appUrl).toString(), {
+  data: { handle: "member0000", action: "unfollow" },
+});
+await page.locator(".queue-tabs").filter({ hasText: "Takipten cikilacaklar" }).waitFor();
+await page.waitForFunction(() => {
+  const text = document.querySelector(".queue-tabs")?.textContent ?? "";
+  return text.includes("1254");
+});
 await page.locator(".member-search input").first().fill("member0000");
 const score = Number(await page.locator(".directory-score strong").first().innerText());
 await page.locator(".match-detail-button").first().click();

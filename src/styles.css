@@ -885,6 +885,101 @@ button:hover,
   box-shadow: 0 0 0 4px rgba(33, 181, 115, 0.14);
 }
 
+.backup-settings {
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: #fff;
+}
+
+.backup-settings summary {
+  min-height: 44px;
+  padding: 10px 12px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  cursor: pointer;
+  font-weight: 800;
+}
+
+.backup-settings[open] {
+  padding-bottom: 10px;
+}
+
+.backup-settings[open] summary {
+  margin-bottom: 2px;
+}
+
+.backup-settings p {
+  margin: 0;
+  padding: 4px 12px 10px;
+  color: var(--muted);
+  font-size: 0.82rem;
+  line-height: 1.45;
+}
+
+.backup-settings > button,
+.backup-settings > label {
+  width: calc(100% - 20px);
+  margin: 6px 10px 0;
+}
+
+.backup-import-button {
+  position: relative;
+  cursor: pointer;
+}
+
+.backup-import-button input {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  opacity: 0;
+  pointer-events: none;
+}
+
+.build-version {
+  display: block;
+  padding: 2px 4px;
+  color: var(--muted);
+  text-align: center;
+  font-size: 0.7rem;
+}
+
+.rhythm-highlights {
+  margin: 14px 0;
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.rhythm-highlights > div {
+  min-width: 0;
+  padding: 10px;
+  border-left: 3px solid var(--teal);
+  background: #f2f9f7;
+}
+
+.rhythm-highlights strong,
+.rhythm-highlights span {
+  display: block;
+}
+
+.rhythm-highlights strong {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 1rem;
+}
+
+.rhythm-highlights span,
+.diary-span {
+  color: var(--muted);
+  font-size: 0.78rem;
+}
+
+.diary-span {
+  margin: 8px 0 12px;
+}
+
 .social-review-queue {
   padding: 14px;
   border: 1px solid var(--line);
@@ -958,6 +1053,22 @@ button:hover,
   .film-summary-shortcuts,
   .social-directory-filters {
     grid-template-columns: 1fr;
+  }
+
+  .rhythm-highlights {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .archive-browser-controls {
+    grid-template-columns: 1fr;
+  }
+
+  .archive-row {
+    grid-template-columns: 30px minmax(0, 1fr) 58px;
+  }
+
+  .archive-row > span:nth-of-type(n + 2) {
+    display: none;
   }
 
   .social-directory-filters .member-search {
@@ -1385,6 +1496,115 @@ select {
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));
   gap: 10px;
+}
+
+.recent-poster-grid figure {
+  min-width: 0;
+  margin: 0;
+}
+
+.recent-poster-grid .poster-image,
+.recent-poster-grid .poster-fallback {
+  width: 100%;
+  aspect-ratio: 2 / 3;
+}
+
+.recent-poster-grid figcaption {
+  padding-top: 6px;
+}
+
+.recent-poster-grid figcaption strong,
+.recent-poster-grid figcaption span {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.recent-poster-grid figcaption strong {
+  font-size: 0.78rem;
+}
+
+.recent-poster-grid figcaption span {
+  color: var(--muted);
+  font-size: 0.7rem;
+}
+
+.film-archive-browser {
+  grid-column: 1 / -1;
+}
+
+.archive-browser-title > div {
+  min-width: 0;
+}
+
+.archive-browser-title h2,
+.archive-browser-title p {
+  margin: 0;
+}
+
+.archive-browser-title p {
+  margin-top: 3px;
+  color: var(--muted);
+  font-size: 0.8rem;
+}
+
+.archive-browser-controls {
+  margin-bottom: 12px;
+  display: grid;
+  grid-template-columns: minmax(240px, 1fr) 190px 190px;
+  gap: 8px;
+}
+
+.archive-browser-controls select {
+  min-width: 0;
+}
+
+.archive-table {
+  border-top: 1px solid var(--line);
+}
+
+.archive-row {
+  min-width: 0;
+  min-height: 54px;
+  display: grid;
+  grid-template-columns: 34px minmax(180px, 1fr) 70px 80px 110px 90px;
+  align-items: center;
+  gap: 10px;
+  padding: 7px 4px;
+  border-bottom: 1px solid var(--line);
+}
+
+.archive-row > div {
+  min-width: 0;
+}
+
+.archive-row strong,
+.archive-row > div span {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.archive-row > span {
+  color: var(--muted);
+  font-size: 0.78rem;
+}
+
+.archive-row .mini-poster {
+  width: 30px;
+  height: 42px;
+  border-radius: 3px;
+}
+
+.archive-state {
+  color: var(--teal) !important;
+  font-weight: 800;
+}
+
+.archive-pagination {
+  margin-top: 12px;
 }
 
 .recommendation {

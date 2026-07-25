@@ -19,8 +19,11 @@ TasteTwin is a local-first Letterboxd social graph and movie taste matching app.
 - Excludes watchlist and unrated entries from co-rated match evidence.
 - Uses a separate validity percentage based on the number of co-rated films.
 - Shows total viewing time, average rating, viewing rhythm, and top genres, directors, actors, and languages.
+- Shows longest diary streaks, busiest month, distinct viewing days, rewatch rate, average runtime and the complete diary span.
+- Browses the complete film archive with search, watched/rated/loved/watchlist filters, sorting and 50-row pagination.
 - Picks a taste-based, short, or random next watch from unwatched watchlist entries with a synopsis and reason.
 - Keeps imported and scanned data on the user's computer.
+- Exports and restores a portable local JSON backup containing film, social, history and management-list data without exposing the TMDB token.
 
 ## Install on Windows
 
@@ -48,6 +51,8 @@ Optional TMDB enrichment accepts the user's local API Read Access Token and adds
 TasteTwin does not automatically follow or unfollow accounts. Letterboxd restricts automated extraction and excessive following, so social filters produce a transparent review queue. The companion extension opens the selected profile, scrolls to Letterboxd's relationship control and highlights it; the user makes the final click.
 
 When that highlighted control is clicked, the extension reports the completed action to the local desktop bridge. The open app updates its following state within about two seconds. This is not remote account monitoring: changes made outside the TasteTwin-assisted flow are discovered by the next full scan.
+
+Follow and unfollow review lists are stored in the main IndexedDB state, included in backups, and automatically remove entries whose relationship has already changed.
 
 For a public or revenue-generating release, asking every user to enter a personal TMDB key does not by itself settle licensing. Review TMDB's current terms and attribution requirements before release.
 

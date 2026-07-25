@@ -125,6 +125,17 @@ Letterboxd Aralik 2025 kullanim kosullari otomatik veri toplama araclarini ve ka
 - Film paneli kesin toplam dakikayi, son 12 aylik akisi, takvim aylarina gore toplami ve yillik dagilimi gosterir.
 - Sure ve aylik dagilim export diary tarihleri ile TMDB sure kapsamina baglidir; eksik filmler veri kapsami satirinda acikca sayilir.
 
+# 0.4.0 - Tasinabilir veri ve tam arsiv
+
+- Film arsivi, sosyal taramalar, takip degisim gecmisi ve takip/takipten cikma listeleri tek JSON yedegine aktarilabilir ve baska bilgisayarda geri yuklenebilir.
+- TMDB API tokeni guvenlik nedeniyle yedek dosyasina eklenmez.
+- Yonetim listeleri gecici localStorage yerine ana IndexedDB durumunda tutulur ve onceki 0.3.2 listeleri otomatik tasinir.
+- Canli takip islemi basariyla uygulamaya yansidiginda artik gecersiz kalan kisi ilgili yonetim listesinden otomatik cikar.
+- Veri silme dugmesi geri donulemez silme oncesinde acik onay ister ve yedek almayi hatirlatir.
+- Film gecmisi en uzun gun serisi, son diary serisi, farkli izleme gunu, en yogun ay, diary tarih araligi, tekrar izleme orani ve ortalama film suresi gosterir.
+- "Canli akis" adi ve ilk sekiz film davranisi kaldirildi; Son izlenenler gercek diary/etkinlik tarihine gore siralanir ve tarih/puan gosterir.
+- Tum film arsivi 50 satirlik gercek sayfalama, film/yil aramasi, izlenen/puanlanan/sevilen/watchlist filtreleri ve tarih/puan/ad/sure siralamasi ile incelenebilir.
+
 ## Benzer urunlerden alinan dersler
 
 - Letterboxd Pro istatistikleri saat, ulke/dil, donem, oyuncu ve yonetmen kapsaminda guclu bir referanstir.

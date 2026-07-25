@@ -52,6 +52,7 @@ import {
   buildFilmInsights,
   buildWatchlistRanking,
   formatRuntime,
+  isWatched,
   pickNextWatch,
   type NextWatchMode,
 } from "./lib/film-insights";
@@ -61,6 +62,11 @@ import type { FilmSignal, Language, MatchResult, UserTaste } from "./types";
 type Tab = "overview" | "matches" | "social" | "profile";
 
 type SocialMember = SocialMemberRecord;
+
+type SocialManagementQueues = {
+  follow: string[];
+  unfollow: string[];
+};
 
 type SocialData =
   | {
@@ -118,6 +124,15 @@ type PersistentAppState = {
   activeId: string;
   accountHandle: string;
   socialByHandle: Record<string, SocialData>;
+  managementQueuesByHandle: Record<string, SocialManagementQueues>;
+};
+
+type TasteTwinBackup = {
+  format: "tastetwin-backup";
+  schemaVersion: 1;
+  appVersion: string;
+  exportedAt: string;
+  state: PersistentAppState;
 };
 
 const PERSISTENT_STATE_KEY = "app";
@@ -168,6 +183,7 @@ export default function App() {
   const [loading, setLoading] = useState(false);
   const [socialLoading, setSocialLoading] = useState(false);
   const [socialByHandle, setSocialByHandle] = useState<Record<string, SocialData>>(loadStoredSocial);
+  const [managementQueuesByHandle, setManagementQueuesByHandle] = useState<Record<string, SocialManagementQueues>>({});
   const [copied, setCopied] = useState(false);
   const [preparedExtensionPath, setPreparedExtensionPath] = useState("");
   const [tmdbToken, setTmdbToken] = useState(() => localStorage.getItem("tastetwin.tmdbToken") ?? "");
@@ -355,6 +371,19 @@ export default function App() {
         if (typeof saved.activeId === "string") setActiveId(saved.activeId);
         if (typeof saved.accountHandle === "string") setAccountHandle(saved.accountHandle);
         if (saved.socialByHandle && typeof saved.socialByHandle === "object") setSocialByHandle(saved.socialByHandle);
+        if (saved.managementQueuesByHandle && typeof saved.managementQueuesByHandle === "object") {
+          setManagementQueuesByHandle(saved.managementQueuesByHandle);
+        } else if (typeof saved.accountHandle === "string" && saved.accountHandle) {
+          try {
+            const legacy = JSON.parse(localStorage.getItem(`tastetwin.socialQueues.${saved.accountHandle}`) ?? "null");
+            if (Array.isArray(legacy?.follow) && Array.isArray(legacy?.unfollow)) {
+              setManagementQueuesByHandle({ [saved.accountHandle]: legacy });
+              localStorage.removeItem(`tastetwin.socialQueues.${saved.accountHandle}`);
+            }
+          } catch {
+            // Ignore malformed pre-0.4 queue data.
+          }
+        }
       })
       .catch((error) => console.warn("TasteTwin IndexedDB restore failed", error))
       .finally(() => {
@@ -374,13 +403,14 @@ export default function App() {
       activeId,
       accountHandle,
       socialByHandle,
+      managementQueuesByHandle,
     })
       .then(() => {
         localStorage.removeItem("tastetwin.users");
         localStorage.removeItem("tastetwin.social");
       })
       .catch((error) => console.warn("TasteTwin IndexedDB save failed", error));
-  }, [users, activeId, accountHandle, socialByHandle, storageReady]);
+  }, [users, activeId, accountHandle, socialByHandle, managementQueuesByHandle, storageReady]);
 
   useEffect(() => {
     async function receiveBrowserScan(event: MessageEvent) {
@@ -468,6 +498,74 @@ export default function App() {
     } catch (error) {
       console.error(error);
       setStatus(t(language, "uploadError"));
+    }
+  }
+
+  function exportLocalBackup() {
+    const backup: TasteTwinBackup = {
+      format: "tastetwin-backup",
+      schemaVersion: 1,
+      appVersion: "0.4.0",
+      exportedAt: new Date().toISOString(),
+      state: {
+        users,
+        activeId,
+        accountHandle,
+        socialByHandle,
+        managementQueuesByHandle,
+      },
+    };
+    const blob = new Blob([JSON.stringify(backup)], { type: "application/json" });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = `tastetwin-yedek-${new Date().toISOString().slice(0, 10)}.json`;
+    link.click();
+    window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+    setStatus(
+      language === "tr"
+        ? `Yerel yedek hazirlandi: ${users.length} profil ve ${Object.keys(socialByHandle).length} sosyal hesap kaydi. TMDB tokeni guvenlik icin eklenmedi.`
+        : `Local backup created with ${users.length} profiles and ${Object.keys(socialByHandle).length} social account records. The TMDB token was excluded for safety.`,
+    );
+  }
+
+  async function importLocalBackup(file?: File) {
+    if (!file) return;
+    try {
+      if (file.size > 250 * 1024 * 1024) throw new Error("backup_too_large");
+      const backup = JSON.parse(await file.text()) as Partial<TasteTwinBackup>;
+      const state = backup.state;
+      if (
+        backup.format !== "tastetwin-backup" ||
+        backup.schemaVersion !== 1 ||
+        !state ||
+        !Array.isArray(state.users) ||
+        typeof state.socialByHandle !== "object"
+      ) {
+        throw new Error("invalid_backup");
+      }
+      const restoredUsers = state.users.map(deriveUserActivity);
+      setUsers(restoredUsers);
+      setActiveId(
+        typeof state.activeId === "string" && restoredUsers.some((user) => user.id === state.activeId)
+          ? state.activeId
+          : restoredUsers[0]?.id ?? "",
+      );
+      setAccountHandle(typeof state.accountHandle === "string" ? state.accountHandle : "");
+      setSocialByHandle(state.socialByHandle ?? {});
+      setManagementQueuesByHandle(state.managementQueuesByHandle ?? {});
+      setTab("overview");
+      setStatus(
+        language === "tr"
+          ? `Yedek geri yuklendi: ${restoredUsers.length} profil. Veriler bu bilgisayardaki uygulama deposuna kaydediliyor.`
+          : `Backup restored: ${restoredUsers.length} profiles. Data is being saved to this computer's app storage.`,
+      );
+    } catch {
+      setStatus(
+        language === "tr"
+          ? "Bu dosya gecerli bir TasteTwin yedegi degil veya okunamayacak kadar buyuk."
+          : "This is not a valid TasteTwin backup or it is too large to read.",
+      );
     }
   }
 
@@ -887,11 +985,18 @@ export default function App() {
   }
 
   function clearProfiles() {
+    const confirmed = window.confirm(
+      language === "tr"
+        ? "Tum film arsivi, sosyal taramalar, takip gecmisi ve yonetim listeleri bu bilgisayardan silinecek. Once Veri yedegi ve tasima bolumunden yedek alman onerilir. Silinsin mi?"
+        : "All film archives, social scans, follow history and management lists will be deleted from this computer. Back up your data first. Continue?",
+    );
+    if (!confirmed) return;
     const handle = (accountHandle || activeUser?.handle || "").toLowerCase();
     setUsers([]);
     setActiveId("");
     setAccountHandle("");
     setSocialByHandle({});
+    setManagementQueuesByHandle({});
     setMatches([]);
     setStatus("");
     setTab("overview");
@@ -1068,6 +1173,27 @@ export default function App() {
           <input type="file" accept=".zip,.csv,text/csv" onChange={(event) => handleUpload(event.target.files?.[0])} />
         </label>
 
+        <details className="backup-settings">
+          <summary>
+            <Download size={16} />
+            {language === "tr" ? "Veri yedegi ve tasima" : "Backup and transfer"}
+          </summary>
+          <p>
+            {language === "tr"
+              ? "Film arsivini, sosyal taramalari, takip gecmisini ve yonetim listelerini tek JSON dosyasina kaydeder. TMDB tokeni yedege konmaz."
+              : "Saves the film archive, social scans, follow history and management lists into one JSON file. The TMDB token is excluded."}
+          </p>
+          <button className="browser-scan-button" onClick={exportLocalBackup} disabled={!users.length}>
+            <Download size={17} />
+            <span>{language === "tr" ? "Tum yerel veriyi yedekle" : "Back up all local data"}</span>
+          </button>
+          <label className="browser-scan-button backup-import-button">
+            <FileUp size={17} />
+            <span>{language === "tr" ? "Yedegi geri yukle" : "Restore backup"}</span>
+            <input type="file" accept=".json,application/json" onChange={(event) => importLocalBackup(event.target.files?.[0])} />
+          </label>
+        </details>
+
         <div className="source-summary">
           <span>{language === "tr" ? "Izlenen film" : "Watched films"}</span>
           <strong>{uploadedUser ? getStats(uploadedUser).watched : 0}</strong>
@@ -1112,6 +1238,7 @@ export default function App() {
             EN
           </button>
         </div>
+        <small className="build-version">TasteTwin 0.4.0 · extension 0.2.2</small>
 
         {status && <p className="status-line">{status}</p>}
       </aside>
@@ -1322,6 +1449,13 @@ export default function App() {
                 networkCandidateLimit={networkCandidateLimit}
                 onNetworkCandidateLimitChange={setNetworkCandidateLimit}
                 onResetHistory={resetFollowerHistory}
+                managementQueues={managementQueuesByHandle[accountHandle || activeUser.handle] ?? { follow: [], unfollow: [] }}
+                onManagementQueuesChange={(queues) =>
+                  setManagementQueuesByHandle((current) => ({
+                    ...current,
+                    [accountHandle || activeUser.handle]: queues,
+                  }))
+                }
               />
             )}
 
@@ -1516,6 +1650,7 @@ function FilmWorkspace({
           <ViewingRhythmPanel language={language} insights={insights} />
           <BarsPanel title={t(language, "favoriteZones")} icon={<Film size={18} />} data={decadeData} />
           <PosterPanel language={language} films={user.films} />
+          <FilmArchiveBrowser language={language} films={user.films} />
         </div>
       )}
 
@@ -1570,7 +1705,12 @@ function FilmInsightsPanel({
       language === "tr" ? "Toplam dakika" : "Total minutes",
       `${insights.totalRuntimeMinutes.toLocaleString(language === "tr" ? "tr-TR" : "en-US")} ${language === "tr" ? "dk" : "min"}`,
     ],
+    [
+      language === "tr" ? "Ortalama film suresi" : "Average runtime",
+      insights.averageRuntimeMinutes ? `${insights.averageRuntimeMinutes} ${language === "tr" ? "dk" : "min"}` : "-",
+    ],
     [language === "tr" ? "Ortalama puan" : "Average rating", insights.averageRating ? insights.averageRating.toFixed(2) : "-"],
+    [language === "tr" ? "Tekrar izleme" : "Rewatch views", `${insights.rewatchViews} (%${insights.rewatchRate})`],
     [language === "tr" ? "TMDB kapsami" : "TMDB coverage", `%${insights.metadataCoverage}`],
   ];
   const groups = [
@@ -1647,6 +1787,38 @@ function ViewingRhythmPanel({
         data={insights.monthlyActivity}
         empty={language === "tr" ? "Diary tarih verisi yok" : "No diary dates"}
       />
+      <div className="rhythm-highlights">
+        <div>
+          <strong>{insights.longestStreakDays}</strong>
+          <span>{language === "tr" ? "en uzun gun serisi" : "longest daily streak"}</span>
+        </div>
+        <div>
+          <strong>{insights.latestStreakDays}</strong>
+          <span>{language === "tr" ? "son kayit serisi" : "latest diary streak"}</span>
+        </div>
+        <div>
+          <strong>{insights.uniqueDiaryDays}</strong>
+          <span>{language === "tr" ? "farkli izleme gunu" : "distinct viewing days"}</span>
+        </div>
+        <div>
+          <strong>
+            {insights.busiestMonth
+              ? `${insights.busiestMonth.name} · ${insights.busiestMonth.count}`
+              : "-"}
+          </strong>
+          <span>{language === "tr" ? "en yogun ay" : "busiest month"}</span>
+        </div>
+      </div>
+      {insights.firstDiaryDate && insights.lastDiaryDate && (
+        <p className="diary-span">
+          {language === "tr" ? "Diary araligi" : "Diary span"}:{" "}
+          <strong>
+            {new Date(`${insights.firstDiaryDate}T00:00:00`).toLocaleDateString(language === "tr" ? "tr-TR" : "en-US")}
+            {" - "}
+            {new Date(`${insights.lastDiaryDate}T00:00:00`).toLocaleDateString(language === "tr" ? "tr-TR" : "en-US")}
+          </strong>
+        </p>
+      )}
       <h3>{language === "tr" ? "Aylara gore film dagilimi" : "Films by month"}</h3>
       <MiniBars
         data={insights.monthOfYearActivity}
@@ -1767,6 +1939,8 @@ function SocialPanel({
   networkCandidateLimit,
   onNetworkCandidateLimitChange,
   onResetHistory,
+  managementQueues,
+  onManagementQueuesChange,
 }: {
   language: Language;
   data?: SocialData;
@@ -1782,6 +1956,8 @@ function SocialPanel({
   networkCandidateLimit: number;
   onNetworkCandidateLimitChange: (value: number) => void;
   onResetHistory: () => void;
+  managementQueues: SocialManagementQueues;
+  onManagementQueuesChange: (queues: SocialManagementQueues) => void;
 }) {
   if (!data) {
     return (
@@ -1942,6 +2118,8 @@ function SocialPanel({
         onLoadActivity={onLoadActivity}
         activityScanProgress={activityScanProgress}
         onSelectMatch={onSelectMatch}
+        managementQueues={managementQueues}
+        onManagementQueuesChange={onManagementQueuesChange}
       />
     </section>
   );
@@ -1956,6 +2134,8 @@ function SocialDirectory({
   onLoadActivity,
   activityScanProgress,
   onSelectMatch,
+  managementQueues,
+  onManagementQueuesChange,
 }: {
   language: Language;
   data: AvailableSocialData;
@@ -1965,6 +2145,8 @@ function SocialDirectory({
   onLoadActivity: (handles: string[], members: SocialMember[]) => void;
   activityScanProgress?: ActivityScanProgress;
   onSelectMatch: (match: MatchResult) => void;
+  managementQueues: SocialManagementQueues;
+  onManagementQueuesChange: (queues: SocialManagementQueues) => void;
 }) {
   const [query, setQuery] = useState("");
   const [myFollow, setMyFollow] = useState<RelationshipFilter>("any");
@@ -1985,9 +2167,6 @@ function SocialDirectory({
   const [manageAction, setManageAction] = useState<"unfollow" | "follow">("unfollow");
   const [reviewOpen, setReviewOpen] = useState(false);
   const [selectedHandles, setSelectedHandles] = useState<Set<string>>(() => new Set());
-  const [managementQueues, setManagementQueues] = useState<SocialManagementQueues>(() =>
-    loadSocialManagementQueues(data.handle),
-  );
   const directory = useMemo(
     () => buildSocialDirectory({
       following: data.following,
@@ -2035,13 +2214,20 @@ function SocialDirectory({
   }, [activity, activityAge, category, followsMe, maxDirectoryActivity, maxDirectoryConnections, maxTaste, minDirectoryActivity, minDirectoryConnections, minTaste, myFollow, pageSize, query, sort, source]);
 
   useEffect(() => {
-    setManagementQueues(loadSocialManagementQueues(data.handle));
     setSelectedHandles(new Set());
   }, [data.handle]);
 
   useEffect(() => {
-    localStorage.setItem(`tastetwin.socialQueues.${data.handle}`, JSON.stringify(managementQueues));
-  }, [data.handle, managementQueues]);
+    const byHandle = new Map(directory.map((entry) => [entry.username.toLowerCase(), entry]));
+    const follow = managementQueues.follow.filter((handle) => !byHandle.get(handle)?.myFollow);
+    const unfollow = managementQueues.unfollow.filter((handle) => byHandle.get(handle)?.myFollow);
+    if (
+      follow.length !== managementQueues.follow.length ||
+      unfollow.length !== managementQueues.unfollow.length
+    ) {
+      onManagementQueuesChange({ follow, unfollow });
+    }
+  }, [directory, managementQueues, onManagementQueuesChange]);
 
   const activityKnown = filtered.filter((entry) => entry.activity?.lastActivityAt).length;
   const missingActivity = directory.filter((entry) => !entry.activity?.lastActivityAt);
@@ -2277,10 +2463,10 @@ function SocialDirectory({
             className="primary-button"
             disabled={!selectedHandles.size}
             onClick={() => {
-              setManagementQueues((current) => ({
-                ...current,
-                [manageAction]: [...new Set([...current[manageAction], ...selectedHandles])],
-              }));
+              onManagementQueuesChange({
+                ...managementQueues,
+                [manageAction]: [...new Set([...managementQueues[manageAction], ...selectedHandles])],
+              });
               setReviewOpen(true);
             }}
           >
@@ -2319,12 +2505,12 @@ function SocialDirectory({
           entries={queuedEntries}
           action={manageAction}
           onRemove={(handle) =>
-            setManagementQueues((current) => ({
-              ...current,
-              [manageAction]: current[manageAction].filter((item) => item !== handle.toLowerCase()),
-            }))
+            onManagementQueuesChange({
+              ...managementQueues,
+              [manageAction]: managementQueues[manageAction].filter((item) => item !== handle.toLowerCase()),
+            })
           }
-          onClear={() => setManagementQueues((current) => ({ ...current, [manageAction]: [] }))}
+          onClear={() => onManagementQueuesChange({ ...managementQueues, [manageAction]: [] })}
         />
       )}
       <SocialDirectoryList
@@ -2589,19 +2775,149 @@ function directoryEntryToMember(entry: SocialDirectoryEntry): SocialMember {
 }
 
 function PosterPanel({ language, films }: { language: Language; films: FilmSignal[] }) {
+  const recent = [...films]
+    .filter(isWatched)
+    .sort((a, b) => filmLatestTimestamp(b) - filmLatestTimestamp(a))
+    .slice(0, 8);
   return (
     <div className="panel poster-panel">
       <div className="panel-title">
         <Clapperboard size={18} />
-        <h2>{language === "tr" ? "Canli akis" : "Live feed"}</h2>
+        <h2>{language === "tr" ? "Son izlenenler" : "Recently watched"}</h2>
       </div>
-      <div className="poster-grid">
-        {films.slice(0, 8).map((film, index) => (
-          <PosterTile key={film.key} film={film} index={index} />
+      <div className="poster-grid recent-poster-grid">
+        {recent.map((film, index) => (
+          <figure key={film.key}>
+            <PosterTile film={film} index={index} />
+            <figcaption>
+              <strong>{film.title}</strong>
+              <span>
+                {formatFilmDate(film, language)}
+                {film.rating !== undefined ? ` · ${formatRating(film.rating)}` : ""}
+              </span>
+            </figcaption>
+          </figure>
         ))}
       </div>
     </div>
   );
+}
+
+function FilmArchiveBrowser({ language, films }: { language: Language; films: FilmSignal[] }) {
+  const [query, setQuery] = useState("");
+  const [filter, setFilter] = useState<"all" | "watched" | "rated" | "loved" | "watchlist">("all");
+  const [sort, setSort] = useState<"recent" | "rating" | "title" | "runtime">("recent");
+  const [page, setPage] = useState(1);
+  const pageSize = 50;
+  const filtered = useMemo(() => {
+    const normalizedQuery = query.trim().toLocaleLowerCase(language === "tr" ? "tr-TR" : "en-US");
+    return films
+      .filter((film) => {
+        if (normalizedQuery && !`${film.title} ${film.year ?? ""}`.toLocaleLowerCase(language === "tr" ? "tr-TR" : "en-US").includes(normalizedQuery)) {
+          return false;
+        }
+        if (filter === "watched") return isWatched(film);
+        if (filter === "rated") return film.rating !== undefined;
+        if (filter === "loved") return film.liked || (film.rating ?? 0) >= 4;
+        if (filter === "watchlist") return film.watchlist && !isWatched(film);
+        return true;
+      })
+      .sort((a, b) => {
+        if (sort === "rating") return (b.rating ?? -1) - (a.rating ?? -1) || a.title.localeCompare(b.title);
+        if (sort === "title") return a.title.localeCompare(b.title);
+        if (sort === "runtime") return (b.runtimeMinutes ?? -1) - (a.runtimeMinutes ?? -1) || a.title.localeCompare(b.title);
+        return filmLatestTimestamp(b) - filmLatestTimestamp(a) || a.title.localeCompare(b.title);
+      });
+  }, [filter, films, language, query, sort]);
+  const totalPages = Math.max(1, Math.ceil(filtered.length / pageSize));
+  const items = filtered.slice((page - 1) * pageSize, page * pageSize);
+
+  useEffect(() => {
+    setPage(1);
+  }, [filter, query, sort]);
+
+  return (
+    <div className="panel film-archive-browser" data-testid="film-archive-browser">
+      <div className="panel-title archive-browser-title">
+        <Film size={18} />
+        <div>
+          <h2>{language === "tr" ? "Tum film arsivi" : "Complete film archive"}</h2>
+          <p>{language === "tr" ? `${filtered.length}/${films.length} film gosteriliyor` : `Showing ${filtered.length}/${films.length} films`}</p>
+        </div>
+      </div>
+      <div className="archive-browser-controls">
+        <label className="member-search">
+          <Search size={16} />
+          <input
+            value={query}
+            placeholder={language === "tr" ? "Film veya yil ara" : "Search film or year"}
+            onChange={(event) => setQuery(event.target.value)}
+          />
+        </label>
+        <select value={filter} onChange={(event) => setFilter(event.target.value as typeof filter)}>
+          <option value="all">{language === "tr" ? "Tum kayitlar" : "All entries"}</option>
+          <option value="watched">{language === "tr" ? "Izlenenler" : "Watched"}</option>
+          <option value="rated">{language === "tr" ? "Puanlananlar" : "Rated"}</option>
+          <option value="loved">{language === "tr" ? "Sevilenler" : "Loved"}</option>
+          <option value="watchlist">{language === "tr" ? "Izlenmemis watchlist" : "Unwatched watchlist"}</option>
+        </select>
+        <select value={sort} onChange={(event) => setSort(event.target.value as typeof sort)}>
+          <option value="recent">{language === "tr" ? "En son izlenen" : "Most recent"}</option>
+          <option value="rating">{language === "tr" ? "Puani en yuksek" : "Highest rating"}</option>
+          <option value="title">{language === "tr" ? "Film adi" : "Title"}</option>
+          <option value="runtime">{language === "tr" ? "En uzun" : "Longest runtime"}</option>
+        </select>
+      </div>
+      <div className="archive-table">
+        {items.map((film, index) => (
+          <div className="archive-row" key={film.key}>
+            <PosterTile film={film} index={index} compact />
+            <div>
+              <strong>{film.title}</strong>
+              <span>{film.year ?? "-"}</span>
+            </div>
+            <span>{film.rating !== undefined ? formatRating(film.rating) : "—"}</span>
+            <span>{film.runtimeMinutes ? `${film.runtimeMinutes} ${language === "tr" ? "dk" : "min"}` : "—"}</span>
+            <span>{formatFilmDate(film, language)}</span>
+            <span className="archive-state">
+              {film.watchlist && !isWatched(film)
+                ? "Watchlist"
+                : film.liked || (film.rating ?? 0) >= 4
+                  ? language === "tr" ? "Sevilen" : "Loved"
+                  : isWatched(film)
+                    ? language === "tr" ? "Izlendi" : "Watched"
+                    : "—"}
+            </span>
+          </div>
+        ))}
+      </div>
+      {filtered.length > pageSize && (
+        <nav className="match-pagination archive-pagination">
+          <button disabled={page <= 1} onClick={() => setPage((value) => Math.max(1, value - 1))}>
+            <ArrowLeft size={16} /> {language === "tr" ? "Onceki" : "Previous"}
+          </button>
+          <span>
+            {(page - 1) * pageSize + 1}-{Math.min(page * pageSize, filtered.length)} / {filtered.length} · {page}/{totalPages}
+          </span>
+          <button disabled={page >= totalPages} onClick={() => setPage((value) => Math.min(totalPages, value + 1))}>
+            {language === "tr" ? "Sonraki" : "Next"} <ArrowRight size={16} />
+          </button>
+        </nav>
+      )}
+    </div>
+  );
+}
+
+function filmLatestTimestamp(film: FilmSignal) {
+  const values = [...film.watchedDates, film.activityDate].filter((value): value is string => Boolean(value));
+  return values.reduce((latest, value) => Math.max(latest, Date.parse(value) || 0), 0);
+}
+
+function formatFilmDate(film: FilmSignal, language: Language) {
+  const timestamp = filmLatestTimestamp(film);
+  return timestamp
+    ? new Date(timestamp).toLocaleDateString(language === "tr" ? "tr-TR" : "en-US")
+    : language === "tr" ? "Tarih yok" : "No date";
 }
 
 function BarsPanel({ title, icon, data }: { title: string; icon: React.ReactNode; data: Array<[string, number]> }) {
@@ -3127,23 +3443,6 @@ function reasonLines(match: MatchResult, language: Language) {
 }
 
 type AvailableSocialData = Extract<SocialData, { available: true }>;
-
-type SocialManagementQueues = {
-  follow: string[];
-  unfollow: string[];
-};
-
-function loadSocialManagementQueues(handle: string): SocialManagementQueues {
-  try {
-    const saved = JSON.parse(localStorage.getItem(`tastetwin.socialQueues.${handle}`) ?? "null");
-    return {
-      follow: Array.isArray(saved?.follow) ? saved.follow.filter((item: unknown) => typeof item === "string") : [],
-      unfollow: Array.isArray(saved?.unfollow) ? saved.unfollow.filter((item: unknown) => typeof item === "string") : [],
-    };
-  } catch {
-    return { follow: [], unfollow: [] };
-  }
-}
 
 function buildBrowserScannerBookmarklet() {
   return `javascript:(async()=>{try{if(!location.hostname.endsWith('letterboxd.com'))throw Error('Open your Letterboxd profile first');const h=location.pathname.split('/').filter(Boolean)[0];if(!h)throw Error('Profile not found');const w=open('http://127.0.0.1:5173/?bridge=1','tastetwin');const scan=async k=>{let u='/' + h + '/' + k + '/',a=[];while(u){const r=await fetch(u,{credentials:'include'});if(!r.ok)throw Error(k+' page failed: '+r.status);const d=new DOMParser().parseFromString(await r.text(),'text/html');a.push(...[...d.querySelectorAll('.person-summary')].map(x=>{const n=x.querySelector('a.name'),i=x.querySelector('img');const p=n?.getAttribute('href')?.split('/').filter(Boolean)[0];return p?{username:p,displayName:n.textContent.trim()||p,avatarUrl:i?.src}:null}).filter(Boolean));u=d.querySelector('.pagination a.next,.paginate-nextprev a.next')?.getAttribute('href')||''}return a};const [following,followers]=await Promise.all([scan('following'),scan('followers')]);await new Promise(r=>setTimeout(r,1600));w.postMessage({type:'TASTETWIN_SOCIAL',handle:h,following,followers},'http://127.0.0.1:5173');w.focus()}catch(e){alert('TasteTwin: '+e.message)}})()`;

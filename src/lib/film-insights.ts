@@ -11,9 +11,18 @@ export type FilmInsights = {
   ratedFilms: number;
   averageRating: number;
   totalRuntimeMinutes: number;
+  averageRuntimeMinutes: number;
   runtimeFilms: number;
   metadataFilms: number;
   diaryEntries: number;
+  uniqueDiaryDays: number;
+  rewatchViews: number;
+  rewatchRate: number;
+  longestStreakDays: number;
+  latestStreakDays: number;
+  firstDiaryDate?: string;
+  lastDiaryDate?: string;
+  busiestMonth?: RankedTerm;
   runtimeCoverage: number;
   metadataCoverage: number;
   topGenres: RankedTerm[];
@@ -48,6 +57,11 @@ export function buildFilmInsights(user: UserTaste, language: "tr" | "en"): FilmI
     (sum, film) => sum + (film.runtimeMinutes ?? 0) * viewCount(film),
     0,
   );
+  const normalizedDates = normalizeDates(dates);
+  const streaks = calculateStreaks(normalizedDates);
+  const allMonths = rankAllMonths(dates);
+  const busiestMonth = [...allMonths].sort((a, b) => b.count - a.count || b.name.localeCompare(a.name))[0];
+  const rewatchViews = Math.max(0, totalViews - watched.length);
 
   return {
     watchedFilms: watched.length,
@@ -57,9 +71,20 @@ export function buildFilmInsights(user: UserTaste, language: "tr" | "en"): FilmI
       ? rated.reduce((sum, film) => sum + (film.rating ?? 0), 0) / rated.length
       : 0,
     totalRuntimeMinutes,
+    averageRuntimeMinutes: runtimeFilms.length
+      ? Math.round(runtimeFilms.reduce((sum, film) => sum + (film.runtimeMinutes ?? 0), 0) / runtimeFilms.length)
+      : 0,
     runtimeFilms: runtimeFilms.length,
     metadataFilms: watched.filter((film) => film.tmdbId).length,
     diaryEntries: dates.length,
+    uniqueDiaryDays: normalizedDates.length,
+    rewatchViews,
+    rewatchRate: totalViews ? Math.round((rewatchViews / totalViews) * 100) : 0,
+    longestStreakDays: streaks.longest,
+    latestStreakDays: streaks.latest,
+    firstDiaryDate: normalizedDates[0],
+    lastDiaryDate: normalizedDates.at(-1),
+    busiestMonth,
     runtimeCoverage: watched.length ? Math.round((runtimeFilms.length / watched.length) * 100) : 0,
     metadataCoverage: watched.length
       ? Math.round(
@@ -78,7 +103,7 @@ export function buildFilmInsights(user: UserTaste, language: "tr" | "en"): FilmI
         .map(languageName),
     ),
     ratingDistribution: rankRatings(rated),
-    monthlyActivity: rankMonths(dates),
+    monthlyActivity: allMonths.slice(-12),
     monthOfYearActivity: rankMonthOfYear(dates, language),
     yearlyActivity: rankYears(dates),
     weekdayActivity: rankWeekdays(dates, language),
@@ -217,7 +242,7 @@ function rankRatings(films: FilmSignal[]): RankedTerm[] {
     .sort((a, b) => Number(a.name) - Number(b.name));
 }
 
-function rankMonths(dates: string[]): RankedTerm[] {
+function rankAllMonths(dates: string[]): RankedTerm[] {
   const counts = new Map<string, number>();
   for (const value of dates) {
     const parsed = new Date(value);
@@ -227,8 +252,33 @@ function rankMonths(dates: string[]): RankedTerm[] {
   }
   return [...counts]
     .map(([name, count]) => ({ name, count }))
-    .sort((a, b) => a.name.localeCompare(b.name))
-    .slice(-12);
+    .sort((a, b) => a.name.localeCompare(b.name));
+}
+
+function normalizeDates(dates: string[]) {
+  return [...new Set(
+    dates
+      .map((value) => {
+        const parsed = new Date(value);
+        return Number.isNaN(parsed.getTime()) ? "" : parsed.toISOString().slice(0, 10);
+      })
+      .filter(Boolean),
+  )].sort();
+}
+
+function calculateStreaks(dates: string[]) {
+  if (!dates.length) return { longest: 0, latest: 0 };
+  let longest = 1;
+  let current = 1;
+  let latest = 1;
+  for (let index = 1; index < dates.length; index += 1) {
+    const previous = Date.parse(`${dates[index - 1]}T00:00:00Z`);
+    const next = Date.parse(`${dates[index]}T00:00:00Z`);
+    current = next - previous === 86_400_000 ? current + 1 : 1;
+    longest = Math.max(longest, current);
+    latest = current;
+  }
+  return { longest, latest };
 }
 
 function rankWeekdays(dates: string[], language: "tr" | "en"): RankedTerm[] {
