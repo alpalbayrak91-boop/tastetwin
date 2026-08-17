@@ -1,32 +1,93 @@
 const MAX_NETWORK_NODES = 10000;
 const MAX_NETWORK_CONNECTORS = 120;
 const MAX_MEMBERS_PER_CONNECTOR = 220;
+const MAX_VIA_DETAILS = 25;
 const PAGE_DELAY_MS = 1400;
 const RETRY_DELAYS_MS = [5000, 12000, 25000];
+const HEARTBEAT_MS = 12000;
+const CHECKPOINT_EVERY_CONNECTORS = 5;
+const SOCIAL_PERCENT_SHARE = 22;
+
 let activeScan;
+let lastProgress;
+let heartbeatTimer;
+let cancelRequestedLocally = false;
+
+class ScanCancelled extends Error {
+  constructor() {
+    super("Tarama iptal edildi.");
+    this.code = "cancelled";
+  }
+}
+
+class ScanFailure extends Error {
+  constructor(code, message, hint) {
+    super(message);
+    this.code = code;
+    this.hint = hint;
+  }
+}
 
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
-  if (message?.type !== "scanTasteTwin") return;
-  startScan(message.mode === "social" ? "social" : "full")
-    .then((payload) => {
-      notify({ state: "complete", payload });
-      sendResponse({ ok: true, payload });
-    })
-    .catch((error) => {
-      notify({ state: "error", message: String(error.message ?? error) });
-      sendResponse({ ok: false, error: String(error.message ?? error) });
-    });
-  return true;
+  if (message?.type === "cancelScan") {
+    cancelRequestedLocally = true;
+    sendResponse({ ok: true, scanning: Boolean(activeScan) });
+    return true;
+  }
+
+  if (message?.type === "scanTasteTwin") {
+    startScan(message.mode === "social" ? "social" : "full", { resume: message.resume === true })
+      .then((payload) => {
+        sendResponse({ ok: true, payload });
+      })
+      .catch((error) => {
+        sendResponse({ ok: false, error: String(error.message ?? error) });
+      });
+    return true;
+  }
+
+  return undefined;
 });
 
 void claimAppRequestedScan();
 void claimAppRequestedManage();
 
-function startScan(mode) {
+function startScan(mode, options = {}) {
   if (!activeScan) {
-    activeScan = runScan(mode).finally(() => {
-      activeScan = undefined;
-    });
+    cancelRequestedLocally = false;
+    activeScan = runScan(mode, options)
+      .then((payload) => {
+        notify({ state: "complete", phase: "done", percent: 100, payload });
+        return payload;
+      })
+      .catch((error) => {
+        if (error instanceof ScanCancelled) {
+          notify({
+            state: "cancelled",
+            phase: "cancelled",
+            percent: lastProgress?.percent ?? 0,
+            code: "cancelled",
+            text: "Tarama iptal edildi.",
+            hint: "Yeni tarama baslatabilir veya kaldigi yerden devam edebilirsin.",
+          });
+        } else {
+          const detail = describeError(error);
+          notify({
+            state: "error",
+            phase: "error",
+            percent: lastProgress?.percent ?? 0,
+            code: detail.code,
+            text: detail.message,
+            hint: detail.hint,
+          });
+        }
+        throw error;
+      })
+      .finally(() => {
+        activeScan = undefined;
+        stopHeartbeat();
+        void clearControl();
+      });
   }
   return activeScan;
 }
@@ -37,8 +98,14 @@ async function claimAppRequestedScan() {
   try {
     const result = await chrome.runtime.sendMessage({ type: "claimPendingScan", handle });
     if (!result?.ok || !result.pending) return;
-    notify({ state: "starting", text: "TasteTwin uygulamasindan tarama emri alindi", current: 0 });
-    await startScan(result.mode === "social" ? "social" : "full");
+    notify({
+      state: "starting",
+      phase: "starting",
+      percent: 0,
+      text: "TasteTwin uygulamasindan tarama emri alindi",
+      handle,
+    });
+    await startScan(result.mode === "social" ? "social" : "full", { resume: result.resume === true });
   } catch {
     // The local app may be closed or this page may not be the requested profile.
   }
@@ -115,51 +182,159 @@ function highlightRelationshipControl(action) {
   }, 12000);
 }
 
-async function runScan(mode) {
+async function runScan(mode, options) {
   const handle = currentHandle();
-  if (!handle) throw new Error("Open your Letterboxd profile, Followers, or Following page first.");
+  if (!handle) {
+    throw new ScanFailure(
+      "no-handle",
+      "Bu sayfa bir Letterboxd profili degil.",
+      "Kendi profil, Followers veya Following sayfani ac ve tekrar dene.",
+    );
+  }
 
-  const started = await chrome.runtime.sendMessage({ type: "beginScan", handle, mode });
-  if (!started?.ok) throw new Error(started?.error ?? "TasteTwin taramasi baslatilamadi");
+  const startedAt = new Date().toISOString();
+  const expected = await expectedCounts(handle);
+  const started = await chrome.runtime.sendMessage({ type: "beginScan", handle, mode, startedAt });
+  if (!started?.ok) {
+    throw new ScanFailure("start-failed", started?.error ?? "Tarama baslatilamadi.", "Sayfayi yenileyip tekrar dene.");
+  }
+  startHeartbeat();
 
-  notify({ state: "social", text: "Following taraniyor", current: 0 });
-  const following = await scanList(handle, "following", (progress) => notify({ state: "social", ...progress }));
-  notify({ state: "social", text: "Followers taraniyor", current: 0 });
-  const followers = await scanList(handle, "followers", (progress) => notify({ state: "social", ...progress }));
+  const checkpoint = options?.resume ? await loadCheckpoint(handle) : undefined;
+  const resumable = checkpoint && checkpoint.mode === mode ? checkpoint : undefined;
+
+  let following = resumable?.following;
+  let followers = resumable?.followers;
+
+  if (!Array.isArray(following) || !Array.isArray(followers)) {
+    notify({
+      state: "social",
+      phase: "following",
+      percent: 0,
+      text: "Following listesi taraniyor",
+      current: 0,
+      total: expected.following,
+      startedAt,
+      handle,
+      mode,
+    });
+    following = await scanList(handle, "following", (progress) =>
+      notify({
+        state: "social",
+        phase: "following",
+        percent: sharePercent(0, SOCIAL_PERCENT_SHARE / 2, progress.current, expected.following),
+        text: `Following: ${progress.current} kisi (sayfa ${progress.page})`,
+        current: progress.current,
+        total: expected.following,
+        startedAt,
+        handle,
+        mode,
+      }),
+    );
+
+    notify({
+      state: "social",
+      phase: "followers",
+      percent: SOCIAL_PERCENT_SHARE / 2,
+      text: "Followers listesi taraniyor",
+      current: 0,
+      total: expected.followers,
+      startedAt,
+      handle,
+      mode,
+    });
+    followers = await scanList(handle, "followers", (progress) =>
+      notify({
+        state: "social",
+        phase: "followers",
+        percent: sharePercent(SOCIAL_PERCENT_SHARE / 2, SOCIAL_PERCENT_SHARE / 2, progress.current, expected.followers),
+        text: `Followers: ${progress.current} kisi (sayfa ${progress.page})`,
+        current: progress.current,
+        total: expected.followers,
+        startedAt,
+        handle,
+        mode,
+      }),
+    );
+  } else {
+    notify({
+      state: "network",
+      phase: "resume",
+      percent: SOCIAL_PERCENT_SHARE,
+      text: `Kaydedilen taramadan devam ediliyor: ${resumable.connectorIndex}/${resumable.connectors.length} baglayici`,
+      startedAt,
+      handle,
+      mode,
+    });
+  }
+
   const payload = { handle, following, followers, capturedAt: new Date().toISOString() };
-  await saveStage(payload, "social-complete", "Takip verisi TasteTwin'e kaydedildi; ag taramasi devam ediyor");
+  if (!resumable) {
+    await saveStage(payload, "social-complete", "Takip verisi TasteTwin'e kaydedildi; ag taramasi devam ediyor", {
+      percent: SOCIAL_PERCENT_SHARE,
+      startedAt,
+      mode,
+    });
+  }
 
   if (mode === "full") {
-    payload.network = await scanTwoHopNetwork(handle, following, followers);
+    payload.network = await scanTwoHopNetwork(handle, following, followers, {
+      startedAt,
+      mode,
+      checkpoint: resumable,
+    });
     payload.capturedAt = new Date().toISOString();
-    await saveStage(payload, "network-complete", `Ag kaydedildi: ${payload.network.nodes} hesap`);
+    await saveStage(payload, "network-complete", `Ag kaydedildi: ${payload.network.nodes} hesap`, {
+      percent: 100,
+      startedAt,
+      mode,
+    });
+    await clearCheckpoint(handle);
   }
   return payload;
 }
 
-async function saveStage(payload, state, text) {
+async function saveStage(payload, state, text, extra = {}) {
   const result = await chrome.runtime.sendMessage({ type: "saveBridge", payload, stage: state });
-  if (!result?.ok) throw new Error(result?.error ?? "Could not send scan to TasteTwin");
-  notify({ state, text, payload });
+  if (!result?.ok) {
+    throw new ScanFailure(
+      "app-offline",
+      result?.error ?? "Sonuc TasteTwin uygulamasina gonderilemedi.",
+      "TasteTwin uygulamasi acik mi? Acip tekrar dene; taranan veri kaybolmadi.",
+    );
+  }
+  notify({ state, phase: state, text, payload, ...extra });
 }
 
-async function scanTwoHopNetwork(owner, directFollowing, directFollowers) {
+async function scanTwoHopNetwork(owner, directFollowing, directFollowers, context) {
   const directMembers = uniqueMembers([...directFollowing, ...directFollowers]);
   const followedMembers = uniqueMembers(directFollowing);
-  const nodes = new Set([owner, ...directMembers.map((member) => member.username)]);
-  const directHandles = new Set(nodes);
-  const candidates = new Map();
-  const daySeed = new Date().toISOString().slice(0, 10);
+  const directHandles = new Set([owner, ...directMembers.map((member) => member.username)]);
+  const checkpoint = context.checkpoint;
+
+  const nodes = new Set(checkpoint?.nodes ?? directHandles);
+  const candidates = new Map(
+    (checkpoint?.candidates ?? []).map((candidate) => [candidate.username, candidate]),
+  );
+  const daySeed = checkpoint?.daySeed ?? new Date().toISOString().slice(0, 10);
   // Only people the owner deliberately follows can seed discovery. A daily
   // stable shuffle spreads the scan over different circles without jumping
-  // into arbitrary followers' networks.
-  const connectors = seededShuffle(followedMembers, `${owner}-${daySeed}`).slice(0, MAX_NETWORK_CONNECTORS);
-  let edges = directMembers.length;
-  let capped = false;
-  let failedConnectors = 0;
-  let connectorsScanned = 0;
+  // into arbitrary followers' networks. A resumed scan keeps the original
+  // connector order so no circle is scanned twice.
+  const connectorNames = checkpoint?.connectors;
+  const connectors = connectorNames
+    ? connectorNames
+        .map((username) => followedMembers.find((member) => member.username === username) ?? { username, displayName: username })
+    : seededShuffle(followedMembers, `${owner}-${daySeed}`).slice(0, MAX_NETWORK_CONNECTORS);
 
-  for (let index = 0; index < connectors.length; index += 1) {
+  let edges = checkpoint?.edges ?? directMembers.length;
+  let capped = false;
+  let failedConnectors = checkpoint?.failedConnectors ?? 0;
+  let connectorsScanned = checkpoint?.connectorsScanned ?? 0;
+  const startIndex = checkpoint?.connectorIndex ?? 0;
+
+  for (let index = startIndex; index < connectors.length; index += 1) {
+    await assertNotCancelled();
     if (nodes.size >= MAX_NETWORK_NODES) {
       capped = true;
       break;
@@ -167,10 +342,17 @@ async function scanTwoHopNetwork(owner, directFollowing, directFollowers) {
     const member = connectors[index];
     notify({
       state: "network",
-      text: `Takip ettigin kisiden ag taraniyor: ${member.username}`,
+      phase: "network",
+      percent: sharePercent(SOCIAL_PERCENT_SHARE, 100 - SOCIAL_PERCENT_SHARE, index, connectors.length),
+      text: `Ag taraniyor: ${member.username}`,
       current: index + 1,
       total: connectors.length,
       nodes: nodes.size,
+      candidates: candidates.size,
+      failedConnectors,
+      startedAt: context.startedAt,
+      handle: owner,
+      mode: context.mode,
     });
     const remaining = MAX_NETWORK_NODES - nodes.size;
     let theirs;
@@ -181,7 +363,9 @@ async function scanTwoHopNetwork(owner, directFollowing, directFollowers) {
         undefined,
         Math.min(remaining, MAX_MEMBERS_PER_CONNECTOR),
       );
-    } catch {
+    } catch (error) {
+      if (error instanceof ScanCancelled) throw error;
+      if (isBlockingError(error)) throw error;
       failedConnectors += 1;
       continue;
     }
@@ -203,15 +387,33 @@ async function scanTwoHopNetwork(owner, directFollowing, directFollowers) {
           followingCount: theirs.length,
           weight: connectorWeight,
         },
-      ];
+      ].slice(-MAX_VIA_DETAILS);
       candidates.set(next.username, {
         ...next,
         connections: (current?.connections ?? 0) + 1,
         connectionWeight: Number(((current?.connectionWeight ?? 0) + connectorWeight).toFixed(3)),
-        via: [...new Set([...(current?.via ?? []), member.username])],
+        via: [...new Set([...(current?.via ?? []), member.username])].slice(-MAX_VIA_DETAILS),
         viaDetails,
         avatarUrl: current?.avatarUrl || next.avatarUrl,
         displayName: current?.displayName || next.displayName,
+      });
+    }
+
+    if ((index + 1) % CHECKPOINT_EVERY_CONNECTORS === 0) {
+      await saveCheckpoint({
+        handle: owner,
+        mode: context.mode,
+        daySeed,
+        startedAt: context.startedAt,
+        connectorIndex: index + 1,
+        connectors: connectors.map((connector) => connector.username),
+        connectorsScanned,
+        failedConnectors,
+        edges,
+        nodes: [...nodes],
+        candidates: [...candidates.values()],
+        following: directFollowing,
+        followers: directFollowers,
       });
     }
   }
@@ -261,13 +463,24 @@ async function scanList(handle, relationship, onProgress, maxMembers = Number.PO
   let page = 0;
 
   while (url && members.size < maxMembers) {
+    await assertNotCancelled();
     const absoluteUrl = new URL(url, location.origin).href;
-    if (visited.has(absoluteUrl)) throw new Error(`${relationship} pagination repeated at page ${page + 1}`);
+    if (visited.has(absoluteUrl)) {
+      throw new ScanFailure(
+        "pagination-loop",
+        `${relationship} sayfalamasi ${page + 1}. sayfada kendini tekrar etti.`,
+        "Letterboxd sayfa yapisi degismis olabilir; sayfayi yenileyip tekrar dene.",
+      );
+    }
     visited.add(absoluteUrl);
     const response = await fetchPage(url, relationship);
     const html = await response.text();
     if (/Just a moment|Enable JavaScript and cookies to continue/i.test(html)) {
-      throw new Error("Letterboxd asked for a browser challenge. Complete it in the tab, then retry.");
+      throw new ScanFailure(
+        "cloudflare",
+        "Letterboxd tarayici dogrulamasi istedi.",
+        "Sekmedeki dogrulamayi tamamla, sonra taramaya kaldigi yerden devam et.",
+      );
     }
     const documentPage = new DOMParser().parseFromString(html, "text/html");
     for (const member of parseMembers(documentPage)) {
@@ -303,22 +516,168 @@ function currentHandle() {
   return /^[a-z0-9_-]{2,32}$/.test(handle ?? "") ? handle : "";
 }
 
+function sharePercent(base, span, current, total) {
+  if (!Number.isFinite(total) || total <= 0) return Math.round(base + span * 0.5);
+  const ratio = Math.max(0, Math.min(1, current / total));
+  return Math.round(base + span * ratio);
+}
+
+async function expectedCounts(handle) {
+  try {
+    const { lastScan } = await chrome.storage.local.get("lastScan");
+    if (lastScan?.handle !== handle) return {};
+    return {
+      following: Array.isArray(lastScan.following) ? lastScan.following.length : undefined,
+      followers: Array.isArray(lastScan.followers) ? lastScan.followers.length : undefined,
+    };
+  } catch {
+    return {};
+  }
+}
+
 function notify(payload) {
-  chrome.runtime.sendMessage({ type: "scanProgress", payload });
+  lastProgress = { ...payload, updatedAt: new Date().toISOString() };
+  chrome.runtime.sendMessage({ type: "scanProgress", payload: lastProgress }).catch(() => {});
+}
+
+function startHeartbeat() {
+  stopHeartbeat();
+  heartbeatTimer = window.setInterval(() => {
+    if (!lastProgress) return;
+    chrome.runtime
+      .sendMessage({ type: "scanProgress", payload: { ...lastProgress, updatedAt: new Date().toISOString(), heartbeat: true } })
+      .catch(() => {});
+  }, HEARTBEAT_MS);
+}
+
+function stopHeartbeat() {
+  if (heartbeatTimer) window.clearInterval(heartbeatTimer);
+  heartbeatTimer = undefined;
+}
+
+window.addEventListener("beforeunload", () => {
+  if (!activeScan) return;
+  chrome.runtime.sendMessage({
+    type: "scanInterrupted",
+    payload: {
+      ...(lastProgress ?? {}),
+      state: "interrupted",
+      code: "tab-closed",
+      text: "Sekme kapandigi veya yenilendigi icin tarama kesildi.",
+      hint: "Ayni profili acip kaldigin yerden devam et.",
+      updatedAt: new Date().toISOString(),
+    },
+  }).catch(() => {});
+});
+
+async function assertNotCancelled() {
+  if (cancelRequestedLocally) throw new ScanCancelled();
+  try {
+    const { scanControl } = await chrome.storage.local.get("scanControl");
+    if (scanControl?.cancelRequestedAt) throw new ScanCancelled();
+  } catch (error) {
+    if (error instanceof ScanCancelled) throw error;
+  }
+}
+
+async function clearControl() {
+  try {
+    await chrome.storage.local.remove("scanControl");
+  } catch {
+    // Storage may be unavailable while the tab is closing.
+  }
+}
+
+async function saveCheckpoint(checkpoint) {
+  try {
+    const result = await chrome.runtime.sendMessage({ type: "saveCheckpoint", checkpoint });
+    if (!result?.ok) return;
+  } catch {
+    // Losing a checkpoint is not fatal; the scan keeps running in memory.
+  }
+}
+
+async function loadCheckpoint(handle) {
+  try {
+    const result = await chrome.runtime.sendMessage({ type: "loadCheckpoint", handle });
+    return result?.ok ? result.checkpoint : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+async function clearCheckpoint(handle) {
+  try {
+    await chrome.runtime.sendMessage({ type: "clearCheckpoint", handle });
+  } catch {
+    // The app may already be closed.
+  }
+}
+
+function isBlockingError(error) {
+  return error instanceof ScanFailure && ["cloudflare", "rate-limited", "app-offline"].includes(error.code);
+}
+
+function describeError(error) {
+  if (error instanceof ScanFailure) {
+    return { code: error.code, message: error.message, hint: error.hint };
+  }
+  const raw = String(error?.message ?? error);
+  if (/Failed to fetch|NetworkError/i.test(raw)) {
+    return {
+      code: "network",
+      message: "Baglanti kurulamadi.",
+      hint: "Internet baglantini ve TasteTwin uygulamasinin acik oldugunu kontrol et.",
+    };
+  }
+  return { code: "unknown", message: raw, hint: "Sayfayi yenileyip tekrar dene." };
 }
 
 async function fetchPage(url, relationship) {
   for (let attempt = 0; attempt <= RETRY_DELAYS_MS.length; attempt += 1) {
+    await assertNotCancelled();
     const response = await fetch(url, { credentials: "include", cache: "no-store" });
     if (response.ok) return response;
+    if (response.status === 404) {
+      throw new ScanFailure(
+        "not-found",
+        `${relationship} sayfasi bulunamadi (404).`,
+        "Kullanici adi degismis veya hesap kapanmis olabilir.",
+      );
+    }
     if (![403, 429].includes(response.status) || attempt === RETRY_DELAYS_MS.length) {
-      throw new Error(`${relationship} page failed: ${response.status}`);
+      if (response.status === 429) {
+        throw new ScanFailure(
+          "rate-limited",
+          "Letterboxd hiz sinirina takildi (429).",
+          "15-30 dakika bekleyip kaldigin yerden devam et. Taranan kisim kaydedildi.",
+        );
+      }
+      if (response.status === 403) {
+        throw new ScanFailure(
+          "forbidden",
+          "Letterboxd erisimi reddetti (403).",
+          "Letterboxd'a giris yaptigindan emin ol, sayfayi yenile ve devam et.",
+        );
+      }
+      throw new ScanFailure(
+        "http-error",
+        `${relationship} sayfasi ${response.status} dondu.`,
+        "Biraz bekleyip kaldigin yerden devam et.",
+      );
     }
     const waitMs = RETRY_DELAYS_MS[attempt];
-    notify({ state: "retry", text: `Letterboxd ${response.status} verdi; ${Math.ceil(waitMs / 1000)} saniye sonra tekrar deneniyor` });
+    notify({
+      ...(lastProgress ?? {}),
+      state: "retry",
+      phase: "retry",
+      code: String(response.status),
+      text: `Letterboxd ${response.status} verdi; ${Math.ceil(waitMs / 1000)} saniye sonra tekrar deneniyor`,
+      hint: "Bu normal bir hiz siniri geri cekilmesi. Bekle.",
+    });
     await delay(waitMs);
   }
-  throw new Error(`${relationship} page failed`);
+  throw new ScanFailure("http-error", `${relationship} sayfasi alinamadi.`, "Biraz bekleyip tekrar dene.");
 }
 
 function delay(ms) {

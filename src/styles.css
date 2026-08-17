@@ -2913,3 +2913,101 @@ select {
     font-size: 34px;
   }
 }
+
+/* Live scan telemetry from the browser extension. */
+.scan-status {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  margin-top: 10px;
+  padding: 10px 12px;
+  border: 1px solid rgba(23, 42, 46, 0.18);
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.72);
+  font-size: 12px;
+}
+
+.scan-status-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.scan-status-head strong {
+  font-size: 12.5px;
+  line-height: 1.35;
+}
+
+.scan-status-head span {
+  font-variant-numeric: tabular-nums;
+  font-weight: 700;
+  opacity: 0.75;
+}
+
+.scan-status-bar {
+  height: 7px;
+  border-radius: 999px;
+  background: rgba(23, 42, 46, 0.12);
+  overflow: hidden;
+}
+
+.scan-status-bar > i {
+  display: block;
+  height: 100%;
+  border-radius: 999px;
+  background: #0e766e;
+  transition: width 0.4s ease;
+}
+
+.scan-status-meta {
+  opacity: 0.72;
+}
+
+.scan-status-code {
+  font-weight: 700;
+  opacity: 0.9;
+}
+
+.scan-status-hint {
+  padding-top: 2px;
+  font-weight: 600;
+  opacity: 0.85;
+}
+
+.scan-status-actions {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.scan-status-actions button {
+  margin-top: 2px;
+}
+
+.scan-status-live {
+  border-color: rgba(14, 118, 110, 0.55);
+  background: rgba(14, 118, 110, 0.08);
+}
+
+.scan-status-warn {
+  border-color: rgba(194, 65, 12, 0.5);
+  background: rgba(234, 88, 12, 0.09);
+}
+
+.scan-status-warn .scan-status-bar > i {
+  background: #ea580c;
+}
+
+.scan-status-bad {
+  border-color: rgba(185, 28, 28, 0.55);
+  background: rgba(220, 38, 38, 0.08);
+}
+
+.scan-status-bad .scan-status-bar > i {
+  background: #dc2626;
+}
+
+.scan-status-done .scan-status-bar > i {
+  background: #0e766e;
+}

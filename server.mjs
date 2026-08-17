@@ -18,6 +18,7 @@ const dataDir = process.env.TASTETWIN_DATA_DIR
   : path.join(__dirname, "data");
 const bridgeCacheFile = path.join(dataDir, "bridge-cache.json");
 const tmdbCacheFile = path.join(dataDir, "tmdb-cache.json");
+const scanStateFile = path.join(dataDir, "scan-state.json");
 const preparedExtensionDir = path.join(dataDir, "chrome-extension");
 const port = Number(process.env.PORT ?? 5173);
 const parser = new XMLParser({
@@ -31,14 +32,22 @@ const bridgeCache = new Map();
 const tmdbCache = new Map();
 let pendingExtensionScan;
 let pendingManageAction;
-const relationshipEvents = [];
+let relationshipEvents = [];
+// Live scan telemetry from the browser extension. The scan itself runs inside
+// the user's Letterboxd tab, so the app can only know it is alive by how fresh
+// this record is. Anything older than SCAN_STALE_MS is reported as stalled.
+const scanProgressByHandle = new Map();
+const scanCheckpoints = new Map();
+const scanCancelRequests = new Map();
+const SCAN_STALE_MS = 90 * 1000;
+let scanStateWriteTimer;
 const SOCIAL_CACHE_MS = 5 * 60 * 1000;
 const BRIDGE_CACHE_MS = 30 * 24 * 60 * 60 * 1000;
 const PUBLIC_SOCIAL_PAGE_LIMIT = 8;
 const PENDING_SCAN_MS = 15 * 60 * 1000;
 const PENDING_MANAGE_MS = 10 * 60 * 1000;
 
-await Promise.all([restoreBridgeCache(), restoreTmdbCache()]);
+await Promise.all([restoreBridgeCache(), restoreTmdbCache(), restoreScanState()]);
 
 const server = createServer(async (req, res) => {
   try {
@@ -58,9 +67,11 @@ const server = createServer(async (req, res) => {
       pendingExtensionScan = {
         handle,
         mode: "full",
+        resume: body.resume === true,
         requestedAt: new Date().toISOString(),
         expiresAt: Date.now() + PENDING_SCAN_MS,
       };
+      scanCancelRequests.delete(handle);
       sendJson(res, 200, { ok: true, ...pendingExtensionScan });
       return;
     }
@@ -75,7 +86,13 @@ const server = createServer(async (req, res) => {
           ? pendingExtensionScan
           : undefined;
       if (pending) pendingExtensionScan = undefined;
-      sendJson(res, 200, pending ? { pending: true, mode: pending.mode, requestedAt: pending.requestedAt } : { pending: false });
+      sendJson(
+        res,
+        200,
+        pending
+          ? { pending: true, mode: pending.mode, resume: pending.resume === true, requestedAt: pending.requestedAt }
+          : { pending: false },
+      );
       return;
     }
 
@@ -130,7 +147,8 @@ const server = createServer(async (req, res) => {
         occurredAt: new Date().toISOString(),
       };
       relationshipEvents.push(event);
-      if (relationshipEvents.length > 500) relationshipEvents.splice(0, relationshipEvents.length - 500);
+      if (relationshipEvents.length > 5000) relationshipEvents.splice(0, relationshipEvents.length - 5000);
+      queueScanStateWrite();
       sendJson(res, 200, { ok: true, event });
       return;
     }
@@ -141,6 +159,102 @@ const server = createServer(async (req, res) => {
         ? relationshipEvents.filter((event) => Date.parse(event.occurredAt) > since)
         : relationshipEvents.slice(-50);
       sendJson(res, 200, { events });
+      return;
+    }
+
+    if (url.pathname === "/api/extension/progress" && req.method === "POST") {
+      const body = await readJsonBody(req);
+      const handle = normalizeHandle(body.handle ?? body.payload?.handle);
+      if (!handle) {
+        sendJson(res, 200, { ok: true, cancelRequested: false });
+        return;
+      }
+      const progress = {
+        state: String(body.state ?? "unknown").slice(0, 40),
+        phase: String(body.phase ?? "").slice(0, 40),
+        percent: Math.max(0, Math.min(100, Number(body.percent) || 0)),
+        text: String(body.text ?? "").slice(0, 400),
+        hint: String(body.hint ?? "").slice(0, 400),
+        code: String(body.code ?? "").slice(0, 60),
+        current: Number.isFinite(Number(body.current)) ? Number(body.current) : undefined,
+        total: Number.isFinite(Number(body.total)) ? Number(body.total) : undefined,
+        nodes: Number.isFinite(Number(body.nodes)) ? Number(body.nodes) : undefined,
+        candidates: Number.isFinite(Number(body.candidates)) ? Number(body.candidates) : undefined,
+        failedConnectors: Number.isFinite(Number(body.failedConnectors)) ? Number(body.failedConnectors) : undefined,
+        handle,
+        mode: body.mode === "social" ? "social" : "full",
+        startedAt: isoOrUndefined(body.startedAt),
+        updatedAt: isoOrUndefined(body.updatedAt) ?? new Date().toISOString(),
+        receivedAt: new Date().toISOString(),
+      };
+      scanProgressByHandle.set(handle, progress);
+      const cancelRequested = Boolean(scanCancelRequests.get(handle));
+      if (cancelRequested && ["cancelled", "error", "complete", "interrupted"].includes(progress.state)) {
+        scanCancelRequests.delete(handle);
+      }
+      queueScanStateWrite();
+      sendJson(res, 200, { ok: true, cancelRequested });
+      return;
+    }
+
+    if (url.pathname === "/api/extension/progress" && req.method === "GET") {
+      const handle = normalizeHandle(url.searchParams.get("handle"));
+      const progress = handle ? scanProgressByHandle.get(handle) : undefined;
+      const checkpoint = handle ? scanCheckpoints.get(handle) : undefined;
+      sendJson(res, 200, {
+        progress: progress ? { ...progress, ...scanFreshness(progress) } : undefined,
+        checkpoint: summarizeCheckpoint(checkpoint),
+        cancelRequested: handle ? Boolean(scanCancelRequests.get(handle)) : false,
+      });
+      return;
+    }
+
+    if (url.pathname === "/api/extension/cancel-scan" && req.method === "POST") {
+      if (req.headers["x-tastetwin-request"] !== "app") {
+        sendJson(res, 403, { error: "app_request_required" });
+        return;
+      }
+      const body = await readJsonBody(req);
+      const handle = normalizeHandle(body.handle);
+      if (!handle) {
+        sendJson(res, 400, { error: "invalid_handle" });
+        return;
+      }
+      scanCancelRequests.set(handle, new Date().toISOString());
+      sendJson(res, 200, { ok: true, handle });
+      return;
+    }
+
+    if (url.pathname === "/api/extension/checkpoint" && req.method === "POST") {
+      const body = await readJsonBody(req);
+      const handle = normalizeHandle(body.handle);
+      if (!handle) {
+        sendJson(res, 400, { error: "invalid_handle" });
+        return;
+      }
+      scanCheckpoints.set(handle, { ...body, handle, savedAt: new Date().toISOString() });
+      queueScanStateWrite();
+      console.log("[scan] checkpoint saved", {
+        handle,
+        connector: body.connectorIndex,
+        of: Array.isArray(body.connectors) ? body.connectors.length : 0,
+        candidates: Array.isArray(body.candidates) ? body.candidates.length : 0,
+      });
+      sendJson(res, 200, { ok: true });
+      return;
+    }
+
+    if (url.pathname === "/api/extension/checkpoint" && req.method === "GET") {
+      const handle = normalizeHandle(url.searchParams.get("handle"));
+      sendJson(res, 200, { checkpoint: handle ? scanCheckpoints.get(handle) : undefined });
+      return;
+    }
+
+    if (url.pathname === "/api/extension/checkpoint" && req.method === "DELETE") {
+      const handle = normalizeHandle(url.searchParams.get("handle"));
+      if (handle) scanCheckpoints.delete(handle);
+      queueScanStateWrite();
+      sendJson(res, 200, { ok: true });
       return;
     }
 
@@ -880,6 +994,98 @@ async function mapConcurrentSettled(values, limit, mapper) {
 
 function errorMessage(error) {
   return error instanceof Error ? error.message : String(error);
+}
+
+function normalizeHandle(value) {
+  const handle = String(value ?? "").trim().replace(/^@/, "").toLowerCase();
+  return /^[a-z0-9_-]{2,32}$/.test(handle) ? handle : "";
+}
+
+function isoOrUndefined(value) {
+  return typeof value === "string" && !Number.isNaN(Date.parse(value)) ? value : undefined;
+}
+
+// The extension heartbeats while a scan runs. A gap wider than SCAN_STALE_MS
+// means the Letterboxd tab stopped reporting, so the scan is not alive even
+// though its last stored state still says "network".
+function scanFreshness(progress) {
+  const updatedAt = Date.parse(progress.updatedAt ?? progress.receivedAt ?? "");
+  const ageMs = Number.isFinite(updatedAt) ? Math.max(0, Date.now() - updatedAt) : undefined;
+  const running = ["starting", "social", "social-complete", "network", "network-complete", "retry"].includes(progress.state);
+  return {
+    ageMs,
+    live: running && ageMs !== undefined && ageMs <= SCAN_STALE_MS,
+    stalled: running && (ageMs === undefined || ageMs > SCAN_STALE_MS),
+  };
+}
+
+function summarizeCheckpoint(checkpoint) {
+  if (!checkpoint?.handle) return undefined;
+  return {
+    handle: checkpoint.handle,
+    mode: checkpoint.mode,
+    startedAt: checkpoint.startedAt,
+    savedAt: checkpoint.savedAt,
+    connectorIndex: checkpoint.connectorIndex ?? 0,
+    connectorTotal: Array.isArray(checkpoint.connectors) ? checkpoint.connectors.length : 0,
+    nodes: Array.isArray(checkpoint.nodes) ? checkpoint.nodes.length : 0,
+    candidates: Array.isArray(checkpoint.candidates) ? checkpoint.candidates.length : 0,
+  };
+}
+
+function queueScanStateWrite() {
+  if (scanStateWriteTimer) return;
+  scanStateWriteTimer = setTimeout(() => {
+    scanStateWriteTimer = undefined;
+    void persistScanState();
+  }, 2000);
+  scanStateWriteTimer.unref?.();
+}
+
+async function persistScanState() {
+  try {
+    await mkdir(dataDir, { recursive: true });
+    const serialized = JSON.stringify({
+      version: 1,
+      savedAt: new Date().toISOString(),
+      progress: Object.fromEntries(scanProgressByHandle),
+      checkpoints: Object.fromEntries(scanCheckpoints),
+      relationshipEvents,
+    });
+    const temporaryFile = `${scanStateFile}.tmp`;
+    await writeFile(temporaryFile, serialized, "utf8");
+    await rename(temporaryFile, scanStateFile);
+  } catch (error) {
+    console.warn("[scan] state persist failed", errorMessage(error));
+  }
+}
+
+async function restoreScanState() {
+  try {
+    const saved = JSON.parse(await readFile(scanStateFile, "utf8"));
+    if (!saved || typeof saved !== "object") return;
+    for (const [handle, progress] of Object.entries(saved.progress ?? {})) {
+      if (!normalizeHandle(handle) || !progress || typeof progress !== "object") continue;
+      // A scan cannot survive an app restart, so anything that claimed to be
+      // running is reported as interrupted instead of quietly looking alive.
+      const running = ["starting", "social", "social-complete", "network", "network-complete", "retry"].includes(progress.state);
+      scanProgressByHandle.set(handle, running ? { ...progress, state: "interrupted", code: "app-restarted" } : progress);
+    }
+    for (const [handle, checkpoint] of Object.entries(saved.checkpoints ?? {})) {
+      if (!normalizeHandle(handle) || !checkpoint || typeof checkpoint !== "object") continue;
+      scanCheckpoints.set(handle, checkpoint);
+    }
+    if (Array.isArray(saved.relationshipEvents)) {
+      relationshipEvents = saved.relationshipEvents.filter((event) => event && typeof event === "object").slice(-5000);
+    }
+    console.log("[scan] state restored", {
+      progress: scanProgressByHandle.size,
+      checkpoints: scanCheckpoints.size,
+      relationshipEvents: relationshipEvents.length,
+    });
+  } catch (error) {
+    if (error?.code !== "ENOENT") console.warn("[scan] state restore failed", errorMessage(error));
+  }
 }
 
 async function restoreBridgeCache() {

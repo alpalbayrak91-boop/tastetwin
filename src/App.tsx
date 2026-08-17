@@ -642,19 +642,27 @@ export default function App() {
     }
   }
 
-  async function openLetterboxdAndScan() {
+  async function openLetterboxdAndScan(resume = false) {
     const handle = (accountHandle || activeUser?.handle || "").trim().replace(/^@/, "").toLowerCase();
     if (!/^[a-z0-9_-]{2,32}$/.test(handle)) {
       setStatus(language === "tr" ? "Once Letterboxd kullanici adini yaz." : "Enter your Letterboxd handle first.");
       return;
     }
     setAccountHandle(handle);
-    setStatus(language === "tr" ? "Chrome aciliyor; eklenti otomatik taramayi baslatacak." : "Opening Chrome; the extension will start automatically.");
+    setStatus(
+      language === "tr"
+        ? resume
+          ? "Chrome aciliyor; tarama kaldigi yerden devam edecek."
+          : "Chrome aciliyor; eklenti otomatik taramayi baslatacak."
+        : resume
+          ? "Opening Chrome; the scan will resume where it stopped."
+          : "Opening Chrome; the extension will start automatically.",
+    );
     try {
       const response = await fetch("/api/extension/request-scan", {
         method: "POST",
         headers: { "Content-Type": "application/json", "X-TasteTwin-Request": "app" },
-        body: JSON.stringify({ handle }),
+        body: JSON.stringify({ handle, resume }),
       });
       const payload = await response.json().catch(() => ({}));
       if (!response.ok) throw new Error(payload.error ?? "scan_request_failed");
@@ -666,11 +674,39 @@ export default function App() {
     }
   }
 
+  // A full network scan can run for hours, so this loop never times out on a
+  // clock alone. It stops when the extension reports failure, or when the
+  // extension stops heartbeating (the tab died) with no progress at all.
   async function waitForRequestedScan(handle: string, requestedAt: string) {
-    const deadline = Date.now() + 15 * 60 * 1000;
+    const startupDeadline = Date.now() + 3 * 60 * 1000;
     let socialReceived = false;
-    while (Date.now() < deadline) {
+    let sawLiveScan = false;
+    while (true) {
       await new Promise((resolve) => window.setTimeout(resolve, 3500));
+
+      const scan = await readScanProgress(handle);
+      if (scan?.live) sawLiveScan = true;
+      if (scan?.state === "error" || scan?.state === "interrupted" || (sawLiveScan && scan?.stalled)) {
+        setStatus(
+          language === "tr"
+            ? `Tarama durdu: ${scan.text ?? "sebep bilinmiyor"}${scan.hint ? ` ${scan.hint}` : ""}`
+            : `Scan stopped: ${scan.text ?? "unknown reason"}${scan.hint ? ` ${scan.hint}` : ""}`,
+        );
+        return;
+      }
+      if (scan?.state === "cancelled") {
+        setStatus(language === "tr" ? "Tarama iptal edildi." : "Scan cancelled.");
+        return;
+      }
+      if (!sawLiveScan && Date.now() > startupDeadline) {
+        setStatus(
+          language === "tr"
+            ? "Eklenti taramayi baslatmadi. Letterboxd sekmesini yenile ve eklenti penceresinden baslat."
+            : "The extension never started. Refresh the Letterboxd tab and start it from the extension popup.",
+        );
+        return;
+      }
+
       try {
         const response = await fetch(`/api/letterboxd/social?handle=${encodeURIComponent(handle)}&source=extension`);
         if (!response.ok) continue;
@@ -699,11 +735,17 @@ export default function App() {
         // The extension may still be scanning.
       }
     }
-    setStatus(
-      language === "tr"
-        ? "Sosyal tarama bekleme suresi doldu. Chrome eklentisindeki son durumu kontrol et."
-        : "Timed out waiting for the scan. Check the extension status in Chrome.",
-    );
+  }
+
+  async function readScanProgress(handle: string): Promise<ScanProgress | undefined> {
+    try {
+      const response = await fetch(`/api/extension/progress?handle=${encodeURIComponent(handle)}`);
+      if (!response.ok) return undefined;
+      const payload = await response.json();
+      return payload.progress as ScanProgress | undefined;
+    } catch {
+      return undefined;
+    }
   }
 
   async function useFollowingAsMatchCandidates() {
@@ -1055,13 +1097,18 @@ export default function App() {
             placeholder="kullaniciadi"
             onChange={(event) => setAccountHandle(event.target.value)}
             onKeyDown={(event) => {
-              if (event.key === "Enter") openLetterboxdAndScan();
+              if (event.key === "Enter") void openLetterboxdAndScan(false);
             }}
           />
-          <button className="primary-button" onClick={openLetterboxdAndScan} disabled={socialLoading || loading}>
+          <button className="primary-button" onClick={() => void openLetterboxdAndScan(false)} disabled={socialLoading || loading}>
             {socialLoading ? <Loader2 className="spin" size={18} /> : <Globe2 size={18} />}
             <span>{language === "tr" ? "Letterboxd'u ac ve otomatik tara" : "Open Letterboxd and scan"}</span>
           </button>
+          <ScanStatusPanel
+            handle={(accountHandle || activeUser?.handle || "").trim().replace(/^@/, "").toLowerCase()}
+            language={language}
+            onResume={(resume) => void openLetterboxdAndScan(resume)}
+          />
           <button className="browser-scan-button" onClick={() => fetchSocialData("extension")} disabled={socialLoading || loading}>
             {socialLoading ? <Loader2 className="spin" size={18} /> : <Link2 size={18} />}
             <span>{language === "tr" ? "Son eklenti taramasini yukle" : "Load latest extension scan"}</span>
@@ -3688,4 +3735,241 @@ function loadStoredSocial(): Record<string, SocialData> {
   } catch {
     return {};
   }
+}
+
+
+type ScanProgress = {
+  state: string;
+  phase?: string;
+  percent?: number;
+  text?: string;
+  hint?: string;
+  code?: string;
+  current?: number;
+  total?: number;
+  nodes?: number;
+  candidates?: number;
+  failedConnectors?: number;
+  handle?: string;
+  mode?: string;
+  startedAt?: string;
+  updatedAt?: string;
+  receivedAt?: string;
+  ageMs?: number;
+  live?: boolean;
+  stalled?: boolean;
+};
+
+type ScanCheckpointSummary = {
+  handle: string;
+  mode?: string;
+  startedAt?: string;
+  savedAt?: string;
+  connectorIndex: number;
+  connectorTotal: number;
+  nodes: number;
+  candidates: number;
+};
+
+const SCAN_ERROR_LABELS_TR: Record<string, string> = {
+  "rate-limited": "Letterboxd hiz siniri (429)",
+  forbidden: "Letterboxd erisimi reddetti (403)",
+  cloudflare: "Letterboxd tarayici dogrulamasi istedi",
+  "app-offline": "TasteTwin uygulamasina ulasilamadi",
+  "tab-closed": "Letterboxd sekmesi kapandi",
+  "app-restarted": "Uygulama yeniden baslatildi",
+  "not-found": "Sayfa bulunamadi (404)",
+  "pagination-loop": "Sayfalama dongusu",
+  network: "Baglanti hatasi",
+  unknown: "Bilinmeyen hata",
+};
+
+const SCAN_ERROR_LABELS_EN: Record<string, string> = {
+  "rate-limited": "Letterboxd rate limit (429)",
+  forbidden: "Letterboxd refused access (403)",
+  cloudflare: "Letterboxd asked for a browser challenge",
+  "app-offline": "Could not reach the TasteTwin app",
+  "tab-closed": "The Letterboxd tab was closed",
+  "app-restarted": "The app was restarted",
+  "not-found": "Page not found (404)",
+  "pagination-loop": "Pagination loop",
+  network: "Connection error",
+  unknown: "Unknown error",
+};
+
+function formatScanAge(ms: number | undefined, language: Language) {
+  if (ms === undefined || !Number.isFinite(ms)) return language === "tr" ? "bilinmiyor" : "unknown";
+  const seconds = Math.round(ms / 1000);
+  if (seconds < 60) return `${seconds} ${language === "tr" ? "sn" : "s"}`;
+  const minutes = Math.round(seconds / 60);
+  if (minutes < 60) return `${minutes} ${language === "tr" ? "dk" : "min"}`;
+  const hours = Math.round(minutes / 60);
+  if (hours < 48) return `${hours} ${language === "tr" ? "saat" : "h"}`;
+  return `${Math.round(hours / 24)} ${language === "tr" ? "gun" : "d"}`;
+}
+
+function describeScanPhase(progress: ScanProgress, language: Language) {
+  if (progress.phase === "network") {
+    return language === "tr"
+      ? `Ag: ${progress.current ?? 0}/${progress.total ?? 0} baglayici | ${progress.nodes ?? 0} hesap | ${progress.candidates ?? 0} aday`
+      : `Network: ${progress.current ?? 0}/${progress.total ?? 0} connectors | ${progress.nodes ?? 0} accounts | ${progress.candidates ?? 0} candidates`;
+  }
+  if (progress.phase === "following" || progress.phase === "followers") {
+    const label = progress.phase === "following" ? "Following" : "Followers";
+    return progress.total
+      ? `${label}: ${progress.current ?? 0}/${progress.total}`
+      : `${label}: ${progress.current ?? 0}`;
+  }
+  if (progress.phase === "retry") {
+    return language === "tr" ? "Hiz sinirinda bekleniyor" : "Backing off after a rate limit";
+  }
+  return "";
+}
+
+/**
+ * The scan itself runs inside the user's Letterboxd tab, so this panel treats
+ * silence as failure: a running state whose last heartbeat is older than the
+ * server's staleness window is shown as interrupted, never as "still working".
+ */
+function ScanStatusPanel({
+  handle,
+  language,
+  onResume,
+}: {
+  handle: string;
+  language: Language;
+  onResume: (resume: boolean) => void;
+}) {
+  const [progress, setProgress] = useState<ScanProgress>();
+  const [checkpoint, setCheckpoint] = useState<ScanCheckpointSummary>();
+  const [cancelling, setCancelling] = useState(false);
+  const [tick, setTick] = useState(0);
+
+  useEffect(() => {
+    if (!handle) return undefined;
+    let cancelled = false;
+
+    async function poll() {
+      try {
+        const response = await fetch(`/api/extension/progress?handle=${encodeURIComponent(handle)}`);
+        if (!response.ok) return;
+        const payload = await response.json();
+        if (cancelled) return;
+        setProgress(payload.progress);
+        setCheckpoint(payload.checkpoint);
+      } catch {
+        // The local server is part of the app; a failed poll is transient.
+      }
+    }
+
+    void poll();
+    const timer = window.setInterval(() => {
+      void poll();
+      setTick((current) => current + 1);
+    }, 2500);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, [handle]);
+
+  const running = Boolean(progress?.live);
+  const stalled = Boolean(progress?.stalled);
+  const ageMs = progress?.updatedAt ? Date.now() - Date.parse(progress.updatedAt) : progress?.ageMs;
+  void tick;
+
+  async function cancelScan() {
+    setCancelling(true);
+    try {
+      await fetch("/api/extension/cancel-scan", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "X-TasteTwin-Request": "app" },
+        body: JSON.stringify({ handle }),
+      });
+    } catch {
+      // The cancel flag is best effort; the extension also has its own button.
+    }
+  }
+
+  if (!handle) return null;
+  if (!progress && !checkpoint) return null;
+
+  const errorLabels = language === "tr" ? SCAN_ERROR_LABELS_TR : SCAN_ERROR_LABELS_EN;
+  const failed = progress?.state === "error" || progress?.state === "interrupted" || stalled;
+  const cancelled = progress?.state === "cancelled";
+  const done = progress?.state === "complete";
+  const percent = Math.max(0, Math.min(100, Math.round(progress?.percent ?? 0)));
+
+  const tone = failed ? "bad" : cancelled ? "warn" : running ? "live" : done ? "done" : "idle";
+  const headline = failed
+    ? stalled && progress?.state !== "interrupted"
+      ? language === "tr"
+        ? "Tarama kesilmis gorunuyor."
+        : "The scan looks interrupted."
+      : progress?.text || (language === "tr" ? "Tarama kesildi." : "The scan stopped.")
+    : progress?.text || (language === "tr" ? "Tarama durumu" : "Scan status");
+
+  return (
+    <div className={`scan-status scan-status-${tone}`}>
+      <div className="scan-status-head">
+        <strong>{headline}</strong>
+        <span>%{percent}</span>
+      </div>
+      <div className="scan-status-bar">
+        <i style={{ width: `${percent}%` }} />
+      </div>
+      {progress && (
+        <span className="scan-status-meta">
+          {describeScanPhase(progress, language)}
+          {progress.failedConnectors
+            ? ` | ${progress.failedConnectors} ${language === "tr" ? "baglayici atlandi" : "connectors skipped"}`
+            : ""}
+        </span>
+      )}
+      {progress && (
+        <span className="scan-status-meta">
+          {language === "tr" ? "Son isaret" : "Last signal"}: {formatScanAge(ageMs, language)}{" "}
+          {language === "tr" ? "once" : "ago"}
+          {progress.startedAt
+            ? ` | ${language === "tr" ? "toplam" : "elapsed"} ${formatScanAge(Date.now() - Date.parse(progress.startedAt), language)}`
+            : ""}
+        </span>
+      )}
+      {progress?.code && errorLabels[progress.code] && (
+        <span className="scan-status-code">{errorLabels[progress.code]}</span>
+      )}
+      {progress?.hint && <span className="scan-status-hint">{progress.hint}</span>}
+      {checkpoint?.connectorIndex ? (
+        <span className="scan-status-meta">
+          {language === "tr"
+            ? `Kayitli ilerleme: ${checkpoint.connectorIndex}/${checkpoint.connectorTotal} baglayici, ${checkpoint.candidates} aday`
+            : `Saved progress: ${checkpoint.connectorIndex}/${checkpoint.connectorTotal} connectors, ${checkpoint.candidates} candidates`}
+        </span>
+      ) : null}
+      <div className="scan-status-actions">
+        {running && (
+          <button className="browser-scan-button" onClick={cancelScan} disabled={cancelling}>
+            <X size={15} />
+            <span>{cancelling ? (language === "tr" ? "Iptal isteniyor" : "Cancelling") : language === "tr" ? "Taramayi iptal et" : "Cancel scan"}</span>
+          </button>
+        )}
+        {!running && checkpoint?.connectorIndex ? (
+          <button className="browser-scan-button" onClick={() => onResume(true)}>
+            <RefreshCcw size={15} />
+            <span>
+              {language === "tr"
+                ? `Kaldigi yerden devam et (${checkpoint.connectorIndex}/${checkpoint.connectorTotal})`
+                : `Resume (${checkpoint.connectorIndex}/${checkpoint.connectorTotal})`}
+            </span>
+          </button>
+        ) : null}
+        {!running && failed && (
+          <button className="browser-scan-button" onClick={() => onResume(false)}>
+            <Globe2 size={15} />
+            <span>{language === "tr" ? "Bastan tara" : "Scan from scratch"}</span>
+          </button>
+        )}
+      </div>
+    </div>
+  );
 }

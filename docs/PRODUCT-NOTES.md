@@ -141,3 +141,54 @@ Letterboxd Aralik 2025 kullanim kosullari otomatik veri toplama araclarini ve ka
 - Letterboxd Pro istatistikleri saat, ulke/dil, donem, oyuncu ve yonetmen kapsaminda guclu bir referanstir.
 - Toolboxd rastgele watchlist secimi, oneriler, benzer film/kullanici ve iki kisi karsilastirmasini tek arac kutusunda sunar.
 - TasteTwin'in ayirt edici alani tam sosyal dizin, takip gecmisi, aktiflik ve zevk sinyallerini ayni filtrelenebilir yonetim ekraninda birlestirmektir.
+
+# 0.5.0 - Tarama sagligi: ilerleme, kesinti tespiti, iptal ve devam
+
+Sorun: tarama Letterboxd sekmesindeki content script icinde calisiyordu. Sekme
+kapanınca is oluyordu fakat `chrome.storage.local.scanStatus` son yazildigi
+haliyle kaliyordu. Popup bu kaydi okuyup "Ag taraniyor" yaziyor, `updatedAt`
+alanini hic gostermiyor ve `setBusy(true)` ile tarama dugmesini kilitliyordu.
+Sonuc: haftalarca once olmus bir tarama canli gorunuyor ve yeni tarama
+baslatilamiyordu. 24 Temmuz 2026 taramasinda sosyal asama kaydedilmis, ag
+asamasi hic tamamlanmamisti.
+
+## Eklenen davranis
+
+- Tarama calisirken content script 12 saniyede bir heartbeat yazar. 90 saniyeden
+  eski bir "calisiyor" durumu artik canli sayilmaz; hem popup hem uygulama bunu
+  "kesilmis" olarak gosterir ve dugmelerin kilidini acar.
+- `beforeunload` ile sekme kapanmasi dogrudan "tab-closed" sebebi olarak
+  kaydedilir. Servis calisani acilista bayat durumlari da kesilmis isaretler.
+- Yuzdelik ilerleme: sosyal asama toplam %22, ag asamasi kalan %78. Sosyal
+  yuzdesi bir onceki taramanin takip/takipci sayisina gore tahmin edilir.
+- Iptal: popup'taki dugme veya uygulamadaki dugme `scanControl` bayragini kurar;
+  tarama bir sonraki sayfa/baglayici sinirinda temiz durur. Uygulamadan verilen
+  iptal, eklentiye bir sonraki ilerleme gonderiminin cevabinda ulasir.
+- Kaldigi yerden devam: her 5 baglayicida bir checkpoint yerel uygulamaya
+  yazilir (baglayici sirasi, taranan dugumler, adaylar, sosyal listeler).
+  Devam eden tarama ayni gunluk siralamayi kullanir, hicbir cevre iki kez
+  taranmaz. Checkpoint chrome.storage yerine uygulamada tutulur; boylece 10.000
+  hesaplik ag eklenti depolama sinirina takilmaz.
+- Hata sebepleri kodlanir ve cozum onerisiyle gosterilir: 429 hiz siniri, 403,
+  Cloudflare dogrulamasi, 404, sayfalama dongusu, uygulama kapali, sekme kapandi.
+- Aday basina `viaDetails` en fazla 25 kayitla sinirlandi. Onceden sinirsizdi ve
+  buyuk taramalarda bellek ile checkpoint boyutunu gereksiz buyutuyordu.
+- Uygulamadaki bekleme dongusu artik 15 dakikalik sabit zaman asimi kullanmiyor.
+  Saatler suren ag taramasi bu yuzden "zaman asimi" diye yanlis raporlaniyordu.
+  Dongu yalnizca hata, kesinti veya hic baslamama durumunda biter.
+
+## Kalicilik duzeltmesi
+
+`relationshipEvents` yalnizca RAM'de tutuluyordu; uygulama her kapandiginda
+"kim takip etti / kim takipten cikti" canli kaydi siliniyordu. Artik ilerleme,
+checkpoint ve iliski olaylari `scan-state.json` dosyasinda saklanir. Uygulama
+yeniden basladiginda "calisiyor" gorunen taramalar kesilmis olarak isaretlenir,
+cunku bir tarama uygulama yeniden baslatmasindan sag cikamaz.
+
+## Yeni API uclari
+
+- `POST/GET /api/extension/progress` - canli tarama telemetrisi; GET cevabi
+  `ageMs`, `live` ve `stalled` alanlarini hesaplar.
+- `POST /api/extension/cancel-scan` - uygulamadan iptal istegi.
+- `POST/GET/DELETE /api/extension/checkpoint` - devam noktasi.
+- `POST /api/extension/request-scan` artik `resume` bayragi tasir.
