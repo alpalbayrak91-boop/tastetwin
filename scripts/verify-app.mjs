@@ -262,6 +262,24 @@ await page.locator(".archive-browser-controls select").first().selectOption("wat
 if (!(await page.locator('[data-testid="film-archive-browser"]').innerText()).includes("Watchlist Only")) {
   throw new Error("Unwatched watchlist archive filter failed");
 }
+await page.locator(".archive-browser-controls select").first().selectOption("all");
+await page.getByRole("button", { name: /Detayli filtre/ }).click();
+await page.getByLabel("En dusuk puan").fill("5");
+const fiveStarText = await page.locator('[data-testid="film-archive-browser"]').innerText();
+if (!/\d+\/\d+ film gosteriliyor/.test(fiveStarText) || (await page.locator(".archive-row").count()) === 0) {
+  throw new Error("Archive rating range filter failed");
+}
+const archiveDownload = page.waitForEvent("download");
+await page.locator(".archive-browser-controls").getByRole("button", { name: "CSV" }).click();
+const archiveCsvText = await readFile(await (await archiveDownload).path(), "utf8");
+if (!archiveCsvText.includes("Ag ortalamasi") || archiveCsvText.split("\r\n").filter(Boolean).length < 2) {
+  throw new Error("Filtered archive CSV export failed");
+}
+await page.getByRole("button", { name: /Filtreleri temizle/ }).click();
+if ((await page.locator(".archive-row").count()) !== 50) throw new Error("Clearing archive filters did not restore the archive");
+if ((await page.getByRole("button", { name: "Tum verileri tek tusla guncelle" }).count()) !== 1) {
+  throw new Error("One-click refresh button is missing");
+}
 await page.screenshot({ path: screenshotPath.replace(/\.png$/i, "-history.png"), fullPage: true });
 await page.locator(".film-workspace-tabs button").filter({ hasText: "Genel bakis" }).click();
 const nextWatchText = await page.locator('[data-testid="next-watch"]').innerText();

@@ -3,11 +3,12 @@ import assert from "node:assert/strict";
 import JSZip from "jszip";
 import { mergeFilmArchive, preserveFilmMetadata } from "../src/lib/film-archive";
 import { readLetterboxdExport } from "../src/lib/letterboxd";
-import { buildMatches, buildMatchesAsync, buildRecommendations, scoreRatingPair } from "../src/lib/taste";
+import { buildMatches, buildMatchesAsync, buildRecommendations, rankAgreement, ratingProfile, scoreRatingPair } from "../src/lib/taste";
 import { buildFilmInsights, isWatched } from "../src/lib/film-insights";
 import type { FilmSignal, UserTaste } from "../src/types";
 import { buildWatchTogetherPicks, filterWatchTogetherPicks, togetherPickReason } from "../src/lib/watch-together";
 import { socialDirectoryCsv } from "../src/lib/social-export";
+import { archiveCsv, archiveFacet, buildNetworkRatings, defaultArchiveFilters, filterArchive, type ArchiveFilters } from "../src/lib/archive-filters";
 import { computeFollowerChanges, followerEventsCsv, type FollowerScan } from "../src/lib/follower-history";
 import { buildSocialDirectory, filterAndSortSocialDirectory, paginateSocialDirectory, type SocialDirectoryFilters } from "../src/lib/social-directory";
 
@@ -218,4 +219,57 @@ test("follower history CSV is newest first and neutralizes spreadsheet formulas"
   assert.equal(lines.length, 3);
   assert.match(lines[1], /Takipten cikti/);
   assert.match(lines[2], /^"'=cmd"/);
+});
+
+test("relative rank agreement treats a harsh rater who orders films the same way as a match", () => {
+  const ratings = [5, 4.5, 4.5, 4, 4, 3.5, 3.5, 3, 3, 2.5, 2, 1.5];
+  const owner = user("owner", ratings.map((rating, index) => film(`f${index}`, { rating })));
+  const harsh = user("harsh", ratings.map((rating, index) => film(`f${index}`, { rating: Math.max(0.5, rating - 1.5) })));
+  const shuffled = user("shuffled", ratings.map((_, index) => film(`f${index}`, { rating: Math.max(0.5, ratings[(index * 5) % ratings.length] - 1.5) })));
+  const [harshMatch] = buildMatches(owner, [harsh]);
+  const [shuffledMatch] = buildMatches(owner, [shuffled]);
+  assert.ok(harshMatch.relativeScore! >= 95, "same ordering on a lower scale is near-perfect rank agreement");
+  assert.ok(harshMatch.rawScore > harshMatch.absoluteScore!, "rank agreement lifts the raw affinity");
+  assert.ok(harshMatch.ratingBias! < -1.3);
+  assert.ok(shuffledMatch.relativeScore! < harshMatch.relativeScore!);
+  assert.ok(harshMatch.score > shuffledMatch.score);
+});
+
+test("relative agreement stays out of sparse comparisons and flat raters", () => {
+  const owner = user("owner", [film("a", { rating: 5 }), film("b", { rating: 3 })]);
+  assert.equal(buildMatches(owner, [user("c", [film("a", { rating: 5 }), film("b", { rating: 3 })])])[0].relativeScore, undefined);
+  assert.equal(rankAgreement([[0.2, 0.5], [0.8, 0.5]]), undefined);
+  const profile = ratingProfile(user("p", [film("x", { rating: 2 }), film("y", { rating: 4 }), film("z", { rating: 4 })]));
+  assert.equal(profile.percentile(2), 1 / 6);
+  assert.equal(profile.percentile(4), (1 + 1) / 3);
+});
+
+test("archive filters combine metadata, ranges, diary year and network ratings", () => {
+  const owner = user("owner", [
+    film("a", { rating: 4.5, year: 1999, genres: ["Drama"], directors: ["Lynch"], watchedDates: ["2025-03-01"], runtimeMinutes: 140 }),
+    film("b", { rating: 2, year: 2010, genres: ["Comedy"], watchedDates: ["2026-01-02"], runtimeMinutes: 90 }),
+    film("c", { watchlist: true, year: 2020, genres: ["Drama"] }),
+    film("d", { watched: true, year: 2001, rewatches: 1 }),
+  ]);
+  const friend = user("friend", [film("a", { rating: 2 }), film("b", { rating: 4 }), film("c", { rating: 5 })]);
+  const other = user("other", [film("c", { rating: 4 })]);
+  const network = buildNetworkRatings(owner, [owner, friend, other]);
+  assert.equal(network.get("c")?.mean, 4.5);
+  assert.equal(network.get("c")?.count, 2);
+  assert.equal(network.has("d"), false);
+  const run = (patch: Partial<ArchiveFilters>) => filterArchive(owner.films, { ...defaultArchiveFilters, ...patch }, network).map((f) => f.key);
+  assert.deepEqual(run({ genre: "Drama", sort: "title" }), ["a", "c"]);
+  assert.deepEqual(run({ minRating: 4 }), ["a"]);
+  assert.deepEqual(run({ yearFrom: 2000, yearTo: 2015, sort: "year" }), ["b", "d"]);
+  assert.deepEqual(run({ watchedYear: 2026 }), ["b"]);
+  assert.deepEqual(run({ maxRuntime: 100 }), ["b"]);
+  assert.deepEqual(run({ status: "unrated-watched" }), ["d"]);
+  assert.deepEqual(run({ status: "watchlist", minNetworkRatings: 2 }), ["c"]);
+  assert.deepEqual(run({ query: "lynch" }), ["a"]);
+  assert.deepEqual(run({ sort: "network" }).slice(0, 2), ["c", "b"]);
+  assert.deepEqual(run({ sort: "network-gap" }).slice(0, 2), ["a", "b"]);
+  assert.deepEqual(archiveFacet(owner.films, "genres"), [["Drama", 2], ["Comedy", 1]]);
+  const csv = archiveCsv(filterArchive(owner.films, { ...defaultArchiveFilters, genre: "Drama", sort: "title" }, network), network, "en").trim().split("\r\n");
+  assert.equal(csv.length, 3);
+  assert.match(csv[2], /"4.5","2"/);
 });

@@ -81,6 +81,12 @@ Bu oturum bulutta çalıştı: Alp'in bilgisayarına, kurulu uygulamaya, Letterb
 - [ ] `npm run make` ile yeni kurulum paketi; kurulu uygulamada (`%APPDATA%\TasteTwin`) eski veri sorunsuz açılıyor mu?
 - [ ] Eski açık madde: eklenti hâlâ `127.0.0.1:5173`'e sabit. 5173 doluyken popup uyarısı eklendi mi?
 
+**0.6.0 eklemeleri için yerelde denenecekler:**
+- [ ] "Tüm verileri tek tuşla güncelle": eklenti kuruluyken beş adım sırayla tamamlanıyor mu? Eklenti yokken tarama adımı ~3 dk sonra "başarısız" olup diğer adımlar devam ediyor mu?
+- [ ] Gerçek arşivde puanlama v3: eşleşme detayındaki "Göreli sıralama uyumu" ve cömert/sert cümlesi mantıklı mı? Sıralama v2'ye göre beklenmedik oynadı mı?
+- [ ] GitHub Actions "Windows installer" iş akışını elle çalıştır; çıkan `TasteTwin-Setup.exe` kuruluyor mu? (Electron indirmesi runner'da `.electron-cache` olmadan yapılır.)
+- [ ] Veri çekmeyi büyütme önerisi (uygulanmadı, gerçek HTML gerekiyor): eklentiye üyelerin `/<üye>/films/ratings/page/N/` sayfalarını yavaş ve kullanıcı başlatmalı okuyan bir mod. RSS yalnız son ~50 aktiviteyi veriyor. Letterboxd koşullarını önce oku; sayfa başına bekleme ve üst sınır koy.
+
 **İnternette çalışma hakkında karar Alp'te:** Şu anki mimari yerel (Electron + yerel Node sunucusu + eklenti köprüsü `127.0.0.1`). Web'e taşımak; giriş/hesap sistemi, sunucuda kişi başı depolama ve Letterboxd isteklerinin veri merkezi IP'lerinden atılmasını gerektirir (engellenme ve kullanım koşulları riski). Önerim: yerel kalsın, çoklu cihaz için bulut klasörü yedeği kullanılsın. İleride istenirse sadece yedeği tarayıcıda açıp gösteren, sunucusuz bir "salt okunur web görüntüleyici" düşünülebilir.
 
 ## Claude → Codex soruları

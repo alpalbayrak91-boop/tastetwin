@@ -4,6 +4,8 @@ TasteTwin is a local-first Letterboxd social graph and movie taste matching app.
 
 ## What it does
 
+- **Refresh all data in one click:** your recent films, the social and two-hop network scan, every member's film activity, TMDB metadata and the cloud backup run in order, with a live step list that explains each step.
+
 - Imports a member's full Letterboxd export ZIP or CSV.
 - Reads following and follower lists through the companion Chrome extension.
 - Finds mutuals, non-followers, new followers, and lost followers.
@@ -22,7 +24,8 @@ TasteTwin is a local-first Letterboxd social graph and movie taste matching app.
 - Uses a separate validity percentage based on the number of co-rated films.
 - Shows total viewing time, average rating, viewing rhythm, and top genres, directors, actors, and languages.
 - Shows longest diary streaks, busiest month, distinct viewing days, rewatch rate, average runtime and the complete diary span.
-- Browses the complete film archive with search, watched/rated/loved/watchlist filters, sorting and 50-row pagination.
+- Browses the complete film archive with search (title, year, director, cast), status filters (watched, rated, loved, watchlist, watched-but-unrated, rewatched, reviewed), genre, director, country, language, rating range, release-year range, year watched, maximum runtime and minimum network ratings; sorts by network favourite, distance from the network, TMDB rating and more; exports the filtered list as CSV.
+- Shows a "network mean" for each film: the average rating from everyone loaded into TasteTwin, with the individual raters on hover.
 - Picks a taste-based, short, or random next watch from unwatched watchlist entries with a synopsis and reason.
 - Keeps imported and scanned data on the user's computer.
 - Exports and restores a portable local JSON backup containing film, social, history and management-list data without exposing the TMDB token.
@@ -30,6 +33,8 @@ TasteTwin is a local-first Letterboxd social graph and movie taste matching app.
 - Optionally writes that backup automatically to a personal cloud sync folder (Google Drive, OneDrive, iCloud Drive or Dropbox desktop apps) and restores it on another computer.
 
 ## Install on Windows
+
+Pushing a `v*` tag builds `TasteTwin-Setup.exe` and the extension ZIP on GitHub Actions and attaches them to a GitHub Release; the "Windows installer" workflow can also be run by hand to get them as a build artifact.
 
 1. Download `TasteTwin-Setup.exe` from the latest GitHub Release.
 2. Install and open TasteTwin.
@@ -46,7 +51,7 @@ TasteTwin is a local-first Letterboxd social graph and movie taste matching app.
 
 Network candidates are ranked by weighted shared connectors. Selective connectors count more than accounts following a very broad set of people, while daily connector shuffling gives successive scans some discovery diversity. RSS matching is processed in small batches and the result count is user-controlled.
 
-The displayed taste score uses only films rated by both people. Rating gaps of 0-1 are positive, 1.5 is neutral, and gaps of 2 or more become increasingly negative. Sentiment context matters: a 2/4 split is penalized more than 0.5/2.5, repeated splits add an extra penalty, and locally rare or divisive films can carry more weight. Sparse comparisons are pulled toward a neutral score of 50 and shown with a separate validity percentage.
+The displayed taste score uses only films rated by both people. Since 0.6 it blends two models: the star-gap model below and a Criticker-style relative rank agreement, which compares where each film sits within each person's own ratings, so a harsh and a generous rater who order films the same way still match. The relative part needs 4 common films and 8 ratings per person and contributes up to 30% as evidence grows. The match dialog shows both parts, validity and how generously the other person rates. Rating gaps of 0-1 are positive, 1.5 is neutral, and gaps of 2 or more become increasingly negative. Sentiment context matters: a 2/4 split is penalized more than 0.5/2.5, repeated splits add an extra penalty, and locally rare or divisive films can carry more weight. Sparse comparisons are pulled toward a neutral score of 50 and shown with a separate validity percentage.
 
 The current scoring model, social-data limits, TMDB recommendation plan, and known gaps are recorded in [docs/PRODUCT-NOTES.md](docs/PRODUCT-NOTES.md).
 

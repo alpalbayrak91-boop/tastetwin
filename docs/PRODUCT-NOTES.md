@@ -2,6 +2,14 @@
 
 Son guncelleme: 9 Ekim 2026
 
+## 9 Ekim 2026 - 0.6.0: puanlama v3, tek tus guncelleme, arsiv filtreleri
+
+- Puanlama v3: yildiz farki modeli (v2) korunur; ustune Criticker'daki gibi goreli siralama uyumu eklenir. Her puan kisinin kendi puan dagilimindaki yuzdelik yere cevrilir, ortak filmlerde bu yuzdeliklerin korelasyonu 0-100'e esler (50 = iliskisiz). En az 4 ortak film ve kisi basina 8 puan gerekir; agirligi ortak film sayisiyla %0'dan %30'a cikar. Eslesme detayinda iki parca, gecerlilik ve "kim daha comert puanliyor" gosterilir.
+- Tek tus: kendi RSS -> eklenti sosyal+ag taramasi -> herkesin RSS aktivitesi -> TMDB (token varsa) -> bulut yedegi. Her adim ayri; tarama basarisiz olursa digerleri yine calisir. Ag taramasi yoksa takip/takipci listesi yine guncellenir.
+- Film arsivi: tur, yonetmen, ulke, dil, puan araligi, yapim yili araligi, izlenen yil, en fazla sure, en az ag puani; yeni durumlar (puansiz izlenen, tekrar izlenen, yorumlu); ag ortalamasi sutunu ve "agdan en farkli puanim" siralamasi; filtrelenmis CSV.
+- GitHub Actions: PR'larda testler; `v*` etiketinde Windows kurulum paketi ve eklenti ZIP'i Release'e eklenir.
+- Rakip arastirmasi: `docs/COMPETITOR-RESEARCH.md`.
+
 ## 9 Ekim 2026 - Takipci gecmisi ve kisisel bulut yedegi
 
 - Takipci gecmisi isim bazinda: her tam taramada kim takip etti / birakti, hangi iki tarama arasinda. Filtre ve CSV var; sosyal veriyle birlikte saklanir ve yedege girer.

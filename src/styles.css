@@ -1552,7 +1552,7 @@ select {
 .archive-browser-controls {
   margin-bottom: 12px;
   display: grid;
-  grid-template-columns: minmax(240px, 1fr) 190px 190px;
+  grid-template-columns: minmax(220px, 1fr) 180px 180px auto auto;
   gap: 8px;
 }
 
@@ -1568,7 +1568,7 @@ select {
   min-width: 0;
   min-height: 54px;
   display: grid;
-  grid-template-columns: 34px minmax(180px, 1fr) 70px 80px 110px 90px;
+  grid-template-columns: 34px minmax(180px, 1fr) 60px 100px 70px 100px 84px;
   align-items: center;
   gap: 10px;
   padding: 7px 4px;
@@ -3187,4 +3187,157 @@ select {
   align-items: flex-start;
   font-size: 0.82rem;
   color: var(--muted);
+}
+
+.score-breakdown {
+  margin: 4px 0 16px;
+  padding: 12px 14px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: #fffdf7;
+}
+
+.score-breakdown h3 {
+  margin: 0 0 8px;
+  font-size: 0.95rem;
+}
+
+.score-breakdown dl {
+  margin: 0;
+  display: grid;
+  gap: 6px;
+}
+
+.score-breakdown dl > div {
+  display: grid;
+  grid-template-columns: minmax(120px, 190px) minmax(0, 1fr);
+  gap: 10px;
+}
+
+.score-breakdown dt {
+  font-weight: 700;
+}
+
+.score-breakdown dd {
+  margin: 0;
+  display: flex;
+  gap: 8px;
+  align-items: baseline;
+  color: var(--muted);
+  font-size: 0.85rem;
+}
+
+.score-breakdown dd strong {
+  color: var(--ink);
+  min-width: 2.5em;
+}
+
+@media (max-width: 640px) {
+  .score-breakdown dl > div {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 2px;
+  }
+}
+
+.full-refresh-steps {
+  list-style: none;
+  margin: 0;
+  padding: 8px 10px;
+  display: grid;
+  gap: 6px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: #fffdf7;
+}
+
+.full-refresh-steps li {
+  display: grid;
+  grid-template-columns: 18px minmax(0, 1fr);
+  gap: 6px;
+  font-size: 0.8rem;
+}
+
+.full-refresh-steps p {
+  margin: 2px 0 0;
+  color: var(--muted);
+  line-height: 1.35;
+}
+
+.full-refresh-steps small {
+  color: var(--muted);
+}
+
+.full-refresh-steps .done .full-refresh-state {
+  color: var(--green);
+}
+
+.full-refresh-steps .failed .full-refresh-state,
+.full-refresh-steps .failed small {
+  color: var(--red);
+}
+
+.full-refresh-steps .skipped {
+  opacity: 0.55;
+}
+
+.full-refresh-state {
+  font-weight: 800;
+  text-align: center;
+}
+
+.archive-advanced {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(170px, 1fr));
+  gap: 10px;
+  align-items: end;
+  margin: 0 0 12px;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: #fffdf7;
+}
+
+.archive-field {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+  font-size: 0.8rem;
+  color: var(--muted);
+}
+
+.archive-field select,
+.archive-field input {
+  min-width: 0;
+  width: 100%;
+  box-sizing: border-box;
+  min-height: 40px;
+}
+
+.archive-field input {
+  padding: 6px 10px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--panel);
+  font: inherit;
+  color: var(--ink);
+}
+
+.archive-range {
+  display: flex;
+  gap: 4px;
+  align-items: center;
+}
+
+.archive-range input {
+  flex: 1 1 0;
+}
+
+.archive-note {
+  grid-column: 1 / -1;
+  margin: 0;
+}
+
+.archive-network {
+  color: var(--blue);
+  font-size: 0.85rem;
 }

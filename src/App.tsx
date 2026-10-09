@@ -37,6 +37,17 @@ import { WatchTogetherPanel } from "./components/WatchTogetherPanel";
 import { socialDirectoryCsv } from "./lib/social-export";
 import { computeFollowerChanges, followerEventsCsv, summarizeFollowerEvents, type FollowerEvent, type FollowerSnapshot } from "./lib/follower-history";
 import { togetherPickReason } from "./lib/watch-together";
+import {
+  archiveCsv,
+  archiveFacet,
+  buildNetworkRatings,
+  defaultArchiveFilters,
+  filterArchive,
+  watchedYears,
+  type ArchiveFilters,
+  type ArchiveSort,
+  type ArchiveStatus,
+} from "./lib/archive-filters";
 import { readLetterboxdExport } from "./lib/letterboxd";
 import { mergeFilmArchive, preserveFilmMetadata } from "./lib/film-archive";
 import {
@@ -146,6 +157,11 @@ type TasteTwinBackup = {
   followerBaselines?: Record<string, unknown>;
 };
 
+type FullRefreshStep = {
+  id: "own" | "scan" | "activity" | "tmdb" | "backup";
+  state: "pending" | "running" | "done" | "failed" | "skipped";
+};
+
 type CloudBackupStatus = {
   folder?: string;
   folderAvailable: boolean;
@@ -215,6 +231,8 @@ export default function App() {
   // Folder this computer has already synced with. Until then automatic backups
   // stay off, so a fresh install never overwrites another computer's backup.
   const [cloudLinked, setCloudLinked] = useState(() => localStorage.getItem("tastetwin.cloudLinked") ?? "");
+  const [fullRefresh, setFullRefresh] = useState<{ running: boolean; steps: FullRefreshStep[]; startedAt: number }>();
+  const [fullRefreshBackupRequest, setFullRefreshBackupRequest] = useState(0);
   const socialByHandleRef = useRef(socialByHandle);
   socialByHandleRef.current = socialByHandle;
   const [copied, setCopied] = useState(false);
@@ -755,6 +773,10 @@ export default function App() {
     }
   }
 
+  useEffect(() => {
+    if (fullRefreshBackupRequest) void backupToCloud(true);
+  }, [fullRefreshBackupRequest]);
+
   function markCloudLinked(folder = "") {
     localStorage.setItem("tastetwin.cloudLinked", folder);
     setCloudLinked(folder);
@@ -840,11 +862,11 @@ export default function App() {
     }
   }
 
-  async function openLetterboxdAndScan(resume = false) {
+  async function openLetterboxdAndScan(resume = false): Promise<boolean> {
     const handle = (accountHandle || activeUser?.handle || "").trim().replace(/^@/, "").toLowerCase();
     if (!/^[a-z0-9_-]{2,32}$/.test(handle)) {
       setStatus(language === "tr" ? "Once Letterboxd kullanici adini yaz." : "Enter your Letterboxd handle first.");
-      return;
+      return false;
     }
     setAccountHandle(handle);
     setStatus(
@@ -865,17 +887,58 @@ export default function App() {
       const payload = await response.json().catch(() => ({}));
       if (!response.ok) throw new Error(payload.error ?? "scan_request_failed");
       window.open(`https://letterboxd.com/${encodeURIComponent(handle)}/`, "_blank", "noopener,noreferrer");
-      void waitForRequestedScan(handle, payload.requestedAt);
+      return await waitForRequestedScan(handle, payload.requestedAt);
     } catch (error) {
       console.error(error);
       setStatus(language === "tr" ? "Otomatik tarama emri verilemedi." : "Could not request automatic scanning.");
+      return false;
     }
+  }
+
+  // One button for everything TasteTwin can collect. Each step is independent:
+  // a failed scan still lets the remaining steps refresh what is already known.
+  async function runFullRefresh() {
+    if (fullRefresh?.running) return;
+    const steps: FullRefreshStep[] = [
+      { id: "own", state: "pending" },
+      { id: "scan", state: "pending" },
+      { id: "activity", state: "pending" },
+      { id: "tmdb", state: tmdbToken.trim() ? "pending" : "skipped" },
+      { id: "backup", state: cloudBackup?.folder ? "pending" : "skipped" },
+    ];
+    const update = (id: FullRefreshStep["id"], state: FullRefreshStep["state"]) => {
+      const index = steps.findIndex((step) => step.id === id);
+      steps[index] = { ...steps[index], state };
+      setFullRefresh({ running: true, steps: [...steps], startedAt: Date.now() });
+    };
+    setFullRefresh({ running: true, steps: [...steps], startedAt: Date.now() });
+    update("own", "running");
+    await refreshOwnActivity();
+    update("own", "done");
+    update("scan", "running");
+    update("scan", (await openLetterboxdAndScan(false)) ? "done" : "failed");
+    update("activity", "running");
+    await useNetworkAsMatchCandidates();
+    update("activity", "done");
+    if (steps.find((step) => step.id === "tmdb")?.state === "pending") {
+      update("tmdb", "running");
+      await enrichWithTmdb();
+      update("tmdb", "done");
+    }
+    if (steps.find((step) => step.id === "backup")?.state === "pending") {
+      update("backup", "running");
+      // Wait a moment so the last state updates are in the backup.
+      await new Promise((resolve) => window.setTimeout(resolve, 1500));
+      setFullRefreshBackupRequest(Date.now());
+      update("backup", "done");
+    }
+    setFullRefresh({ running: false, steps: [...steps], startedAt: Date.now() });
   }
 
   // A full network scan can run for hours, so this loop never times out on a
   // clock alone. It stops when the extension reports failure, or when the
   // extension stops heartbeating (the tab died) with no progress at all.
-  async function waitForRequestedScan(handle: string, requestedAt: string) {
+  async function waitForRequestedScan(handle: string, requestedAt: string): Promise<boolean> {
     const startupDeadline = Date.now() + 3 * 60 * 1000;
     let socialReceived = false;
     let sawLiveScan = false;
@@ -890,11 +953,11 @@ export default function App() {
             ? `Tarama durdu: ${scan.text ?? "sebep bilinmiyor"}${scan.hint ? ` ${scan.hint}` : ""}`
             : `Scan stopped: ${scan.text ?? "unknown reason"}${scan.hint ? ` ${scan.hint}` : ""}`,
         );
-        return;
+        return false;
       }
       if (scan?.state === "cancelled") {
         setStatus(language === "tr" ? "Tarama iptal edildi." : "Scan cancelled.");
-        return;
+        return false;
       }
       if (!sawLiveScan && Date.now() > startupDeadline) {
         setStatus(
@@ -902,7 +965,7 @@ export default function App() {
             ? "Eklenti taramayi baslatmadi. Letterboxd sekmesini yenile ve eklenti penceresinden baslat."
             : "The extension never started. Refresh the Letterboxd tab and start it from the extension popup.",
         );
-        return;
+        return false;
       }
 
       try {
@@ -927,7 +990,7 @@ export default function App() {
               ? `Tarama tamamlandi: ${enriched.counts.following} takip, ${enriched.counts.followers} takipci, ${enriched.network.candidateCount ?? 0} ag adayi.`
               : `Scan complete: ${enriched.counts.following} following, ${enriched.counts.followers} followers, ${enriched.network.candidateCount ?? 0} network candidates.`,
           );
-          return;
+          return true;
         }
       } catch {
         // The extension may still be scanning.
@@ -963,9 +1026,10 @@ export default function App() {
     if (!handle) return;
     setLoading(true);
     setStatus("");
+    const handles: string[] = [];
+    const members: SocialMember[] = [];
+    let networkAvailable = true;
     try {
-      const handles: string[] = [];
-      const members: SocialMember[] = [];
       let offset = 0;
       let total = 0;
       do {
@@ -980,22 +1044,26 @@ export default function App() {
         offset = payload.nextOffset ?? total;
         setStatus(language === "tr" ? `Ag listesi aliniyor: ${handles.length}/${total}` : `Loading network list: ${handles.length}/${total}`);
       } while (offset < total && (networkCandidateLimit === 0 || handles.length < networkCandidateLimit));
-      const directMembers = socialByHandle[handle]?.available
-        ? [...socialByHandle[handle].following, ...socialByHandle[handle].followers]
-        : [];
-      const directHandles = [...new Set(directMembers.map((member) => member.username.toLowerCase()))];
-      const directSet = new Set(directHandles);
-      const discoveries = handles.filter(
-        (candidate) => candidate !== handle.toLowerCase() && !directSet.has(candidate.toLowerCase()),
-      );
-      await fetchProfilesForHandles(
-        [...directHandles, ...discoveries],
-        [...directMembers, ...members],
-      );
     } catch (error) {
-      console.error(error);
+      // Without a network scan the direct following/followers still get refreshed.
+      console.warn(error);
+      networkAvailable = false;
+    }
+    const social = socialByHandleRef.current[handle];
+    const directMembers = social?.available ? [...social.following, ...social.followers] : [];
+    const directHandles = [...new Set(directMembers.map((member) => member.username.toLowerCase()))];
+    const directSet = new Set(directHandles);
+    const discoveries = handles.filter(
+      (candidate) => candidate !== handle.toLowerCase() && !directSet.has(candidate.toLowerCase()),
+    );
+    if (!directHandles.length && !discoveries.length) {
       setStatus(language === "tr" ? "Ag taramasi bulunamadi. Chrome eklentisinden ag haritasini calistir." : "Network scan not found. Run the network map in the Chrome extension.");
       setLoading(false);
+      return;
+    }
+    await fetchProfilesForHandles([...directHandles, ...discoveries], [...directMembers, ...members]);
+    if (!networkAvailable) {
+      setStatus((current) => `${current} ${language === "tr" ? "Ag taramasi olmadigi icin yalniz takip/takipci listesi guncellendi." : "No network scan yet, so only following/followers were refreshed."}`);
     }
   }
 
@@ -1307,9 +1375,14 @@ export default function App() {
               if (event.key === "Enter") void openLetterboxdAndScan(false);
             }}
           />
-          <button className="primary-button" onClick={() => void openLetterboxdAndScan(false)} disabled={socialLoading || loading}>
+          <button className="primary-button full-refresh-button" onClick={() => void runFullRefresh()} disabled={socialLoading || loading || fullRefresh?.running}>
+            {fullRefresh?.running ? <Loader2 className="spin" size={18} /> : <RefreshCcw size={18} />}
+            <span>{language === "tr" ? "Tum verileri tek tusla guncelle" : "Refresh all data in one click"}</span>
+          </button>
+          {fullRefresh && <FullRefreshPanel language={language} steps={fullRefresh.steps} running={fullRefresh.running} />}
+          <button className="browser-scan-button" onClick={() => void openLetterboxdAndScan(false)} disabled={socialLoading || loading}>
             {socialLoading ? <Loader2 className="spin" size={18} /> : <Globe2 size={18} />}
-            <span>{language === "tr" ? "Letterboxd'u ac ve otomatik tara" : "Open Letterboxd and scan"}</span>
+            <span>{language === "tr" ? "Sadece takip/ag taramasi" : "Social and network scan only"}</span>
           </button>
           <ScanStatusPanel
             handle={(accountHandle || activeUser?.handle || "").trim().replace(/^@/, "").toLowerCase()}
@@ -1617,6 +1690,7 @@ export default function App() {
                 tmdbLoading={tmdbLoading}
                 tmdbRun={tmdbRun}
                 onEnrich={enrichWithTmdb}
+                users={users}
                 hasTmdbToken={Boolean(tmdbToken.trim())}
               />
             )}
@@ -1864,6 +1938,7 @@ function FilmWorkspace({
   tmdbRun,
   onEnrich,
   hasTmdbToken,
+  users,
 }: {
   language: Language;
   user: UserTaste;
@@ -1878,6 +1953,7 @@ function FilmWorkspace({
   tmdbRun: TmdbRunState;
   onEnrich: () => void;
   hasTmdbToken: boolean;
+  users: UserTaste[];
 }) {
   const [view, setView] = useState<FilmWorkspaceView>("summary");
   const enrichable = user.films.filter(
@@ -1985,7 +2061,7 @@ function FilmWorkspace({
           <ViewingRhythmPanel language={language} insights={insights} />
           <BarsPanel title={t(language, "favoriteZones")} icon={<Film size={18} />} data={decadeData} />
           <PosterPanel language={language} films={user.films} />
-          <FilmArchiveBrowser language={language} films={user.films} />
+          <FilmArchiveBrowser language={language} owner={user} users={users} />
         </div>
       )}
 
@@ -3154,104 +3230,189 @@ function PosterPanel({ language, films }: { language: Language; films: FilmSigna
   );
 }
 
-function FilmArchiveBrowser({ language, films }: { language: Language; films: FilmSignal[] }) {
-  const [query, setQuery] = useState("");
-  const [filter, setFilter] = useState<"all" | "watched" | "rated" | "loved" | "watchlist">("all");
-  const [sort, setSort] = useState<"recent" | "rating" | "title" | "runtime">("recent");
+function FilmArchiveBrowser({ language, owner, users }: { language: Language; owner: UserTaste; users: UserTaste[] }) {
+  const films = owner.films;
+  const tr = language === "tr";
+  const locale = tr ? "tr-TR" : "en-US";
+  const [filters, setFilters] = useState<ArchiveFilters>(defaultArchiveFilters);
+  const [showMore, setShowMore] = useState(false);
   const [page, setPage] = useState(1);
   const pageSize = 50;
-  const filtered = useMemo(() => {
-    const normalizedQuery = query.trim().toLocaleLowerCase(language === "tr" ? "tr-TR" : "en-US");
-    return films
-      .filter((film) => {
-        if (normalizedQuery && !`${film.title} ${film.year ?? ""}`.toLocaleLowerCase(language === "tr" ? "tr-TR" : "en-US").includes(normalizedQuery)) {
-          return false;
-        }
-        if (filter === "watched") return isWatched(film);
-        if (filter === "rated") return film.rating !== undefined;
-        if (filter === "loved") return film.liked || (film.rating ?? 0) >= 4;
-        if (filter === "watchlist") return film.watchlist && !isWatched(film);
-        return true;
-      })
-      .sort((a, b) => {
-        if (sort === "rating") return (b.rating ?? -1) - (a.rating ?? -1) || a.title.localeCompare(b.title);
-        if (sort === "title") return a.title.localeCompare(b.title);
-        if (sort === "runtime") return (b.runtimeMinutes ?? -1) - (a.runtimeMinutes ?? -1) || a.title.localeCompare(b.title);
-        return filmLatestTimestamp(b) - filmLatestTimestamp(a) || a.title.localeCompare(b.title);
-      });
-  }, [filter, films, language, query, sort]);
+  const networkRatings = useMemo(() => buildNetworkRatings(owner, users), [owner, users]);
+  const facets = useMemo(() => ({
+    genres: archiveFacet(films, "genres"),
+    directors: archiveFacet(films, "directors"),
+    countries: archiveFacet(films, "countries"),
+    languages: archiveFacet(films, "originalLanguage"),
+    years: watchedYears(films),
+  }), [films]);
+  const filtered = useMemo(() => filterArchive(films, filters, networkRatings, locale), [films, filters, networkRatings, locale]);
   const totalPages = Math.max(1, Math.ceil(filtered.length / pageSize));
   const items = filtered.slice((page - 1) * pageSize, page * pageSize);
+  const activeCount = Object.entries(filters).filter(([key, value]) => key !== "sort" && value !== defaultArchiveFilters[key as keyof ArchiveFilters]).length;
+  const set = <K extends keyof ArchiveFilters>(key: K, value: ArchiveFilters[K]) => setFilters((current) => ({ ...current, [key]: value }));
+  const optionalNumber = (value: string) => (value.trim() ? Number(value) : undefined);
 
   useEffect(() => {
     setPage(1);
-  }, [filter, query, sort]);
+  }, [filters]);
+
+  function downloadCsv() {
+    const url = URL.createObjectURL(new Blob([archiveCsv(filtered, networkRatings, language)], { type: "text/csv;charset=utf-8" }));
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = `tastetwin-film-arsivi-${new Date().toISOString().slice(0, 10)}.csv`;
+    link.click();
+    window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+  }
+
+  const facetSelect = (key: "genre" | "director" | "country" | "language", label: string, values: Array<[string, number]>) => (
+    <label className="archive-field">
+      <span>{label}</span>
+      <select value={filters[key]} onChange={(event) => set(key, event.target.value)} disabled={!values.length}>
+        <option value="">{values.length ? (tr ? "Tumu" : "All") : (tr ? "TMDB verisi yok" : "No TMDB data")}</option>
+        {values.map(([value, count]) => <option key={value} value={value}>{value} ({count})</option>)}
+      </select>
+    </label>
+  );
 
   return (
     <div className="panel film-archive-browser" data-testid="film-archive-browser">
       <div className="panel-title archive-browser-title">
         <Film size={18} />
         <div>
-          <h2>{language === "tr" ? "Tum film arsivi" : "Complete film archive"}</h2>
-          <p>{language === "tr" ? `${filtered.length}/${films.length} film gosteriliyor` : `Showing ${filtered.length}/${films.length} films`}</p>
+          <h2>{tr ? "Tum film arsivi" : "Complete film archive"}</h2>
+          <p>{tr ? `${filtered.length}/${films.length} film gosteriliyor` : `Showing ${filtered.length}/${films.length} films`}</p>
         </div>
       </div>
       <div className="archive-browser-controls">
         <label className="member-search">
           <Search size={16} />
           <input
-            value={query}
-            placeholder={language === "tr" ? "Film veya yil ara" : "Search film or year"}
-            onChange={(event) => setQuery(event.target.value)}
+            value={filters.query}
+            placeholder={tr ? "Film, yil, yonetmen veya oyuncu ara" : "Search film, year, director or cast"}
+            onChange={(event) => set("query", event.target.value)}
           />
         </label>
-        <select value={filter} onChange={(event) => setFilter(event.target.value as typeof filter)}>
-          <option value="all">{language === "tr" ? "Tum kayitlar" : "All entries"}</option>
-          <option value="watched">{language === "tr" ? "Izlenenler" : "Watched"}</option>
-          <option value="rated">{language === "tr" ? "Puanlananlar" : "Rated"}</option>
-          <option value="loved">{language === "tr" ? "Sevilenler" : "Loved"}</option>
-          <option value="watchlist">{language === "tr" ? "Izlenmemis watchlist" : "Unwatched watchlist"}</option>
+        <select value={filters.status} onChange={(event) => set("status", event.target.value as ArchiveStatus)} aria-label={tr ? "Durum" : "Status"}>
+          <option value="all">{tr ? "Tum kayitlar" : "All entries"}</option>
+          <option value="watched">{tr ? "Izlenenler" : "Watched"}</option>
+          <option value="rated">{tr ? "Puanlananlar" : "Rated"}</option>
+          <option value="loved">{tr ? "Sevilenler" : "Loved"}</option>
+          <option value="watchlist">{tr ? "Izlenmemis watchlist" : "Unwatched watchlist"}</option>
+          <option value="unrated-watched">{tr ? "Izlenip puanlanmayanlar" : "Watched but unrated"}</option>
+          <option value="rewatched">{tr ? "Tekrar izlenenler" : "Rewatched"}</option>
+          <option value="reviewed">{tr ? "Yorum yazdiklarim" : "Reviewed"}</option>
         </select>
-        <select value={sort} onChange={(event) => setSort(event.target.value as typeof sort)}>
-          <option value="recent">{language === "tr" ? "En son izlenen" : "Most recent"}</option>
-          <option value="rating">{language === "tr" ? "Puani en yuksek" : "Highest rating"}</option>
-          <option value="title">{language === "tr" ? "Film adi" : "Title"}</option>
-          <option value="runtime">{language === "tr" ? "En uzun" : "Longest runtime"}</option>
+        <select value={filters.sort} onChange={(event) => set("sort", event.target.value as ArchiveSort)} aria-label={tr ? "Siralama" : "Sort"}>
+          <option value="recent">{tr ? "En son izlenen" : "Most recent"}</option>
+          <option value="rating">{tr ? "Puani en yuksek" : "Highest rating"}</option>
+          <option value="network">{tr ? "Agin en sevdigi" : "Network favourite"}</option>
+          <option value="network-gap">{tr ? "Agdan en farkli puanim" : "Most different from network"}</option>
+          <option value="tmdb">{tr ? "TMDB puani" : "TMDB rating"}</option>
+          <option value="year">{tr ? "En yeni yapim" : "Newest release"}</option>
+          <option value="title">{tr ? "Film adi" : "Title"}</option>
+          <option value="runtime">{tr ? "En uzun" : "Longest runtime"}</option>
         </select>
+        <button className="browser-scan-button" onClick={() => setShowMore((value) => !value)} aria-expanded={showMore}>
+          <Search size={15} />
+          <span>{tr ? "Detayli filtre" : "More filters"}{activeCount ? ` (${activeCount})` : ""}</span>
+        </button>
+        <button className="browser-scan-button" onClick={downloadCsv} disabled={!filtered.length}>
+          <Download size={15} />
+          <span>CSV</span>
+        </button>
       </div>
-      <div className="archive-table">
-        {items.map((film, index) => (
-          <div className="archive-row" key={film.key}>
-            <PosterTile film={film} index={index} compact />
-            <div>
-              <strong>{film.title}</strong>
-              <span>{film.year ?? "-"}</span>
+      {showMore && (
+        <div className="archive-advanced">
+          {facetSelect("genre", tr ? "Tur" : "Genre", facets.genres)}
+          {facetSelect("director", tr ? "Yonetmen" : "Director", facets.directors)}
+          {facetSelect("country", tr ? "Ulke" : "Country", facets.countries)}
+          {facetSelect("language", tr ? "Dil" : "Language", facets.languages)}
+          <label className="archive-field">
+            <span>{tr ? "Puanim" : "My rating"}</span>
+            <div className="archive-range">
+              <input type="number" min={0} max={5} step={0.5} value={filters.minRating} onChange={(event) => set("minRating", Number(event.target.value) || 0)} aria-label={tr ? "En dusuk puan" : "Minimum rating"} />
+              <span>–</span>
+              <input type="number" min={0} max={5} step={0.5} value={filters.maxRating} onChange={(event) => set("maxRating", Number(event.target.value) || 5)} aria-label={tr ? "En yuksek puan" : "Maximum rating"} />
             </div>
-            <span>{film.rating !== undefined ? formatRating(film.rating) : "—"}</span>
-            <span>{film.runtimeMinutes ? `${film.runtimeMinutes} ${language === "tr" ? "dk" : "min"}` : "—"}</span>
-            <span>{formatFilmDate(film, language)}</span>
-            <span className="archive-state">
-              {film.watchlist && !isWatched(film)
-                ? "Watchlist"
-                : film.liked || (film.rating ?? 0) >= 4
-                  ? language === "tr" ? "Sevilen" : "Loved"
-                  : isWatched(film)
-                    ? language === "tr" ? "Izlendi" : "Watched"
-                    : "—"}
-            </span>
-          </div>
-        ))}
+          </label>
+          <label className="archive-field">
+            <span>{tr ? "Yapim yili" : "Release year"}</span>
+            <div className="archive-range">
+              <input type="number" placeholder="1900" value={filters.yearFrom ?? ""} onChange={(event) => set("yearFrom", optionalNumber(event.target.value))} aria-label={tr ? "Baslangic yili" : "From year"} />
+              <span>–</span>
+              <input type="number" placeholder="2026" value={filters.yearTo ?? ""} onChange={(event) => set("yearTo", optionalNumber(event.target.value))} aria-label={tr ? "Bitis yili" : "To year"} />
+            </div>
+          </label>
+          <label className="archive-field">
+            <span>{tr ? "Izledigim yil" : "Year watched"}</span>
+            <select value={filters.watchedYear ?? ""} onChange={(event) => set("watchedYear", optionalNumber(event.target.value))}>
+              <option value="">{tr ? "Tumu" : "All"}</option>
+              {facets.years.map((year) => <option key={year} value={year}>{year}</option>)}
+            </select>
+          </label>
+          <label className="archive-field">
+            <span>{tr ? "En fazla sure (dk)" : "Max runtime (min)"}</span>
+            <input type="number" min={0} step={10} value={filters.maxRuntime ?? ""} onChange={(event) => set("maxRuntime", optionalNumber(event.target.value))} />
+          </label>
+          <label className="archive-field">
+            <span>{tr ? "En az ag puani" : "Min network ratings"}</span>
+            <input type="number" min={0} value={filters.minNetworkRatings} onChange={(event) => set("minNetworkRatings", Math.max(0, Number(event.target.value) || 0))} />
+          </label>
+          <button className="browser-scan-button" onClick={() => setFilters({ ...defaultArchiveFilters, sort: filters.sort })} disabled={!activeCount}>
+            <X size={15} />
+            <span>{tr ? "Filtreleri temizle" : "Clear filters"}</span>
+          </button>
+          <p className="muted-line archive-note">
+            {tr
+              ? "Ag ortalamasi, TasteTwin'e yuklenen diger uyelerin (takip, takipci, ag adaylari) puanlarindan hesaplanir; RSS yalniz son aktiviteyi kapsar. Tur, yonetmen, ulke ve dil icin TMDB zenginlestirmesi gerekir."
+              : "Network mean uses ratings from other members loaded into TasteTwin (following, followers, network candidates); RSS covers recent activity only. Genre, director, country and language need TMDB enrichment."}
+          </p>
+        </div>
+      )}
+      <div className="archive-table">
+        {items.map((film, index) => {
+          const network = networkRatings.get(film.key);
+          return (
+            <div className="archive-row" key={film.key}>
+              <PosterTile film={film} index={index} compact />
+              <div>
+                <strong>{film.title}</strong>
+                <span>{[film.year, film.directors[0]].filter(Boolean).join(" · ") || "-"}</span>
+              </div>
+              <span>{film.rating !== undefined ? formatRating(film.rating) : "—"}</span>
+              <span
+                className="archive-network"
+                title={network ? network.raters.slice(0, 12).map((rater) => `@${rater.handle}: ${formatRating(rater.rating)}`).join("\n") : undefined}
+              >
+                {network ? `${tr ? "Ag" : "Net"} ${network.mean.toFixed(1)} (${network.count})` : "—"}
+              </span>
+              <span>{film.runtimeMinutes ? `${film.runtimeMinutes} ${tr ? "dk" : "min"}` : "—"}</span>
+              <span>{formatFilmDate(film, language)}</span>
+              <span className="archive-state">
+                {film.watchlist && !isWatched(film)
+                  ? "Watchlist"
+                  : film.liked || (film.rating ?? 0) >= 4
+                    ? tr ? "Sevilen" : "Loved"
+                    : isWatched(film)
+                      ? tr ? "Izlendi" : "Watched"
+                      : "—"}
+              </span>
+            </div>
+          );
+        })}
       </div>
       {filtered.length > pageSize && (
         <nav className="match-pagination archive-pagination">
           <button disabled={page <= 1} onClick={() => setPage((value) => Math.max(1, value - 1))}>
-            <ArrowLeft size={16} /> {language === "tr" ? "Onceki" : "Previous"}
+            <ArrowLeft size={16} /> {tr ? "Onceki" : "Previous"}
           </button>
           <span>
             {(page - 1) * pageSize + 1}-{Math.min(page * pageSize, filtered.length)} / {filtered.length} · {page}/{totalPages}
           </span>
           <button disabled={page >= totalPages} onClick={() => setPage((value) => Math.min(totalPages, value + 1))}>
-            {language === "tr" ? "Sonraki" : "Next"} <ArrowRight size={16} />
+            {tr ? "Sonraki" : "Next"} <ArrowRight size={16} />
           </button>
         </nav>
       )}
@@ -3541,6 +3702,7 @@ function MatchDetail({
             ? `${match.commonCount} ortak puanli film, gecerlilik %${match.confidence}. Ham uyum ${match.rawScore}; toplu ayrisma cezasi -${match.divergencePenalty}; yerel nislik ${match.nicheScore}/100. Kanit azsa skor 50'ye yaklastirilir. Watchlist ve puansiz filmler hesaba katilmaz.`
             : `${match.commonCount} co-rated films, ${match.confidence}% validity. Raw affinity ${match.rawScore}; repeated-split penalty -${match.divergencePenalty}; local niche score ${match.nicheScore}/100. Sparse evidence pulls the score toward 50. Watchlist and unrated films are excluded.`}
         </p>
+        <ScoreBreakdown match={match} language={language} />
 
         <WatchTogetherPanel target={target} match={match} language={language} />
 
@@ -3872,6 +4034,82 @@ function cleanSocialMembers(value: unknown): SocialMember[] | undefined {
     });
   }
   return [...members.values()];
+}
+
+function FullRefreshPanel({ language, steps, running }: { language: Language; steps: FullRefreshStep[]; running: boolean }) {
+  const tr = language === "tr";
+  const labels: Record<FullRefreshStep["id"], [string, string]> = {
+    own: tr ? ["Kendi son filmlerin", "RSS'teki yeni puan ve diary kayitlarin arsive eklenir."] : ["Your recent films", "New ratings and diary entries from RSS join your archive."],
+    scan: tr ? ["Takip, takipci ve ag", "Letterboxd sekmesinde eklenti tum listeleri ve ikinci halkayi tarar; takipci gecmisi guncellenir."] : ["Following, followers, network", "The extension scans every list and the second ring in your Letterboxd tab; follower history updates."],
+    activity: tr ? ["Herkesin film aktivitesi", "Takip, takipci ve ag adaylarinin RSS puanlari alinir, zevk skorlari yeniden hesaplanir."] : ["Everyone's film activity", "RSS ratings for following, followers and network candidates; taste scores are recalculated."],
+    tmdb: tr ? ["TMDB film bilgisi", "Sure, tur, yonetmen, oyuncu ve oneriler eklenir (token gerekir)."] : ["TMDB film data", "Runtime, genres, directors, cast and recommendations (token required)."],
+    backup: tr ? ["Bulut yedegi", "Secili senkron klasorune yedek yazilir."] : ["Cloud backup", "A backup is written to your sync folder."],
+  };
+  const stateText: Record<FullRefreshStep["state"], string> = tr
+    ? { pending: "bekliyor", running: "suruyor", done: "tamam", failed: "basarisiz", skipped: "atlandi" }
+    : { pending: "waiting", running: "running", done: "done", failed: "failed", skipped: "skipped" };
+  return (
+    <ol className="full-refresh-steps" aria-live="polite">
+      {steps.map((step) => (
+        <li key={step.id} className={step.state}>
+          <span className="full-refresh-state">
+            {step.state === "running" ? <Loader2 className="spin" size={14} /> : step.state === "done" ? "✓" : step.state === "failed" ? "!" : "·"}
+          </span>
+          <div>
+            <strong>{labels[step.id][0]}</strong> <small>{stateText[step.state]}</small>
+            <p>{labels[step.id][1]}</p>
+          </div>
+        </li>
+      ))}
+      {!running && (
+        <li className="done">
+          <span className="full-refresh-state">✓</span>
+          <div><strong>{tr ? "Bitti" : "Finished"}</strong></div>
+        </li>
+      )}
+    </ol>
+  );
+}
+
+function ScoreBreakdown({ match, language }: { match: MatchResult; language: Language }) {
+  const tr = language === "tr";
+  const bias = match.ratingBias ?? 0;
+  const biasText = Math.abs(bias) < 0.25
+    ? tr ? "Ortak filmlerde ikinizin puan olcegi benzer." : "You both use a similar rating scale on common films."
+    : tr
+      ? `${match.user.displayName} ortak filmlerde senden ortalama ${Math.abs(bias).toFixed(1)} yildiz ${bias > 0 ? "comert" : "sert"} puanliyor.`
+      : `${match.user.displayName} rates common films ${Math.abs(bias).toFixed(1)} stars ${bias > 0 ? "more generously" : "more harshly"} than you on average.`;
+  const rows: Array<[string, string, string]> = [
+    [
+      tr ? "Yildiz farki modeli" : "Star-gap model",
+      String(match.absoluteScore ?? match.rawScore),
+      tr ? "0-1 fark arti, 1.5 notr, 2+ eksi; sevme/sevmeme ayrimi daha agir." : "0-1 gaps add, 1.5 is neutral, 2+ subtracts; love/hate splits weigh more.",
+    ],
+    [
+      tr ? "Goreli siralama uyumu" : "Relative rank agreement",
+      match.relativeScore === undefined ? (tr ? "yetersiz" : "too little data") : String(match.relativeScore),
+      match.relativeScore === undefined
+        ? tr ? "En az 4 ortak film ve kisi basina 8 puan gerekir." : "Needs 4 common films and 8 ratings per person."
+        : tr
+          ? `Her filmin kisinin kendi puanlari icindeki yeri karsilastirilir (Criticker yontemi). Ham uyuma %${match.relativeWeight ?? 0} etkiler.`
+          : `Compares where each film sits within each person's own ratings (Criticker-style). Contributes ${match.relativeWeight ?? 0}% of raw affinity.`,
+    ],
+    [tr ? "Gecerlilik" : "Validity", `%${match.confidence}`, tr ? "Ortak film arttikca yukselir; dusukse skor 50'ye cekilir." : "Rises with common films; low validity pulls the score to 50."],
+  ];
+  return (
+    <div className="score-breakdown">
+      <h3>{tr ? "Puan nasil hesaplandi?" : "How the score was built"}</h3>
+      <dl>
+        {rows.map(([label, value, note]) => (
+          <div key={label}>
+            <dt>{label}</dt>
+            <dd><strong>{value}</strong><span>{note}</span></dd>
+          </div>
+        ))}
+      </dl>
+      <p className="muted-line">{biasText}</p>
+    </div>
+  );
 }
 
 function FollowerTimeline({ language, handle, events }: { language: Language; handle: string; events: FollowerEvent[] }) {

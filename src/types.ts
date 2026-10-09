@@ -58,6 +58,14 @@ export type MatchResult = {
   recommendationScore: number;
   score: number;
   rawScore: number;
+  /** Rating-gap model on raw stars (v2). */
+  absoluteScore?: number;
+  /** Rank agreement within each person's own rating scale, 0-100; absent with too little evidence. */
+  relativeScore?: number;
+  /** Share of rawScore taken from relativeScore, in percent. */
+  relativeWeight?: number;
+  /** Candidate's mean minus yours on co-rated films, in stars. */
+  ratingBias?: number;
   confidence: number;
   candidateFilmCount: number;
   commonCount: number;
