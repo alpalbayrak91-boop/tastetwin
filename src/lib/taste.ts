@@ -1,4 +1,6 @@
 import type { FilmSignal, MatchResult, Recommendation, UserTaste } from "../types";
+import { isWatched } from "./film-insights";
+import { buildWatchTogetherPicks } from "./watch-together";
 
 const toneWords = [
   "lonely",
@@ -22,9 +24,7 @@ const toneWords = [
 ];
 
 export function getStats(user: UserTaste) {
-  const watched = user.films.filter(
-    (film) => film.rating !== undefined || film.watchedDates.length > 0 || (film.liked && !film.watchlist),
-  ).length;
+  const watched = user.films.filter(isWatched).length;
   const rated = user.films.filter((film) => film.rating !== undefined).length;
   const reviews = user.films.filter((film) => film.review).length;
   const rewatches = user.films.reduce((sum, film) => sum + film.rewatches, 0);
@@ -86,7 +86,7 @@ export async function buildMatchesAsync(
 }
 
 export function buildRecommendations(target: UserTaste, matches: MatchResult[]): Recommendation[] {
-  const seen = new Set(target.films.map((film) => film.key));
+  const seen = new Set(target.films.filter(isWatched).map((film) => film.key));
   const candidates = new Map<string, Recommendation>();
 
   for (const match of matches.slice(0, 5)) {
@@ -173,7 +173,7 @@ function scoreUser(
   const evidenceFactor = confidence / 100;
   const score = commonCount ? Math.round(50 + (rawScore - 50) * evidenceFactor) : 0;
 
-  const togetherPick = pickWatchlistFilm(target, candidate, commonFilms);
+  const togetherPick = buildWatchTogetherPicks(target, candidate, commonFilms)[0];
   const nicheScore = calculateNicheScore(candidate, community);
   const networkSignal = Math.round(
     clamp(Math.log2(1 + (candidate.networkConnectionWeight ?? candidate.networkConnections ?? 0)) * 30, 0, 100),
@@ -252,74 +252,6 @@ function interpolateGapScore(difference: number) {
     }
   }
   return points.at(-1)?.[1] ?? -65;
-}
-
-function pickWatchlistFilm(
-  target: UserTaste,
-  candidate: UserTaste,
-  commonFilms: MatchResult["commonFilms"],
-): MatchResult["togetherPick"] {
-  const candidateMap = new Map(candidate.films.map((film) => [film.key, film]));
-  const mutualWatchlist = target.films
-    .filter((film) => film.watchlist && candidateMap.get(film.key)?.watchlist)
-    .sort((a, b) => a.title.localeCompare(b.title))[0];
-  if (mutualWatchlist) return { film: mutualWatchlist, kind: "mutual-watchlist" };
-
-  const yourWatchlistTheyLoved = target.films
-    .filter((film) => {
-      if (!film.watchlist) return false;
-      const candidateFilm = candidateMap.get(film.key);
-      return candidateFilm?.rating !== undefined && candidateFilm.rating >= 4;
-    })
-    .map((film) => ({ film, candidateRating: candidateMap.get(film.key)?.rating }))
-    .sort((a, b) => (b.candidateRating ?? 0) - (a.candidateRating ?? 0) || a.film.title.localeCompare(b.film.title))[0];
-  return yourWatchlistTheyLoved
-    ? { ...yourWatchlistTheyLoved, kind: "your-watchlist-they-loved" }
-    : pickTasteFitWatchlist(target, commonFilms);
-}
-
-function pickTasteFitWatchlist(
-  target: UserTaste,
-  commonFilms: MatchResult["commonFilms"],
-): MatchResult["togetherPick"] {
-  const seeds = commonFilms
-    .filter((item) => item.targetRating >= 4 && item.candidateRating >= 4)
-    .map((item) => item.film);
-  if (!seeds.length) return undefined;
-
-  const ranked = target.films
-    .filter((film) => film.watchlist)
-    .map((film) => {
-      const directorOverlap = overlapRatio(film.directors, seeds.flatMap((seed) => seed.directors));
-      const genreOverlap = overlapRatio(film.genres, seeds.flatMap((seed) => seed.genres));
-      const countryOverlap = overlapRatio(film.countries, seeds.flatMap((seed) => seed.countries));
-      const keywordOverlap = overlapRatio(film.keywords ?? [], seeds.flatMap((seed) => seed.keywords ?? []));
-      const recommendedBySeed =
-        film.tmdbId !== undefined &&
-        seeds.some((seed) => seed.tmdbRecommendations?.includes(String(film.tmdbId)));
-      const fitScore = Math.round(
-        (Number(recommendedBySeed) * 0.45 +
-          keywordOverlap * 0.25 +
-          directorOverlap * 0.18 +
-          genreOverlap * 0.08 +
-          countryOverlap * 0.04) *
-          100,
-      );
-      return { film, fitScore, directorOverlap, genreOverlap, keywordOverlap, recommendedBySeed };
-    })
-    .filter((item) => item.fitScore > 0)
-    .sort((a, b) => b.fitScore - a.fitScore)[0];
-  if (!ranked) return undefined;
-  const reason = ranked.recommendedBySeed
-    ? "TMDB recommends it from a shared-loved film."
-    : ranked.keywordOverlap > 0
-      ? "It shares specific TMDB keywords with shared-loved films."
-      : ranked.directorOverlap > 0
-        ? "Shared-loved films have a director overlap."
-        : ranked.genreOverlap > 0
-          ? "Shared-loved films have a genre overlap."
-          : "Shared-loved films have a country overlap.";
-  return { film: ranked.film, kind: "taste-fit-watchlist", fitScore: ranked.fitScore, reason };
 }
 
 type FilmCommunityStat = { count: number; mean: number; variance: number };

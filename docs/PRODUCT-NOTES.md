@@ -1,6 +1,28 @@
 # TasteTwin urun ve teknik notlari
 
-Son guncelleme: 24 Temmuz 2026
+Son guncelleme: 26 Eylul 2026
+
+## 26 Eylul 2026 - Dogruluk ve birlikte izleme guncellemesi
+
+- `ratings.csv` guncel puan icin oncelikli; eski diary/review kaydi bunu ezmez.
+- Ayni diary kaydinin review dosyasinda da bulunmasi tekrar izlemeyi iki kez saymaz.
+- `watched.csv` eklenme tarihi diary izleme tarihi sayilmaz; puansiz izlenmis filmler ayri `watched` sinyaliyla korunur.
+- Ayni gunun iki diary kaydi korunur. Bos/ilgisiz dosya mevcut arsivi sessizce bosaltmaz.
+- Export/yedek aktarimi, IndexedDB kaydi tamamlanmadan basarili gosterilmez; hemen yenilemede veri kaybi onlenir.
+- Birlikte izleme, izlenmis filmleri watchlist isareti kalsa bile dislar. Arkadasin dusuk puan verdigi film metadata benzerligiyle tekrar onerilmez.
+- Eslesme detayinda altili sayfalama, en fazla sure, sadece ortak watchlist, TR/EN nedenler ve Letterboxd baglantilari bulunur. RSS'de olmayan izleme gecmisi "bilinmiyor" olarak aciklanir.
+- Sosyal filtrelerin tum sonucu, sayfa siniri olmadan UTF-8 CSV'ye aktarilir. Puan/gecerlilik/ortak film/baglanti ve takip yonleri dahildir; bilinmeyen olcumler bos birakilir.
+- Yerel API Origin/Host/JSON kontrolleri ve sinirli preflight destegi kullanir. Vite 5174'ten API 5173'e proxy yapar.
+- Yedek ve arayuz surumu artik paket/eklenti manifestinden gelir.
+- Tekrarlanabilir testler `npm test` ve `npm run test:browser` ile calisir; gercek kullanici deposuna dokunmaz.
+
+Eski birlestirilmis kayitlarda diary tarihinin hangi CSV'den geldigi saklanmadigi icin, eski tarih/puan/tekrar izleme sorunlarini duzeltmek orijinal exportu yeniden yuklemeyi gerektirir.
+
+26 Eylul kontrol siniri: uretim bagimliliklarinda `npm audit --omit=dev` sifir acik;
+Electron Forge gelistirme/kurulum zincirinde 24 bildirim kaldi (3 dusuk, 20 yuksek,
+1 kritik). `extract-zip`, eski `tar` ve `tmp` zincirleri icin zorlayici major/downgrade
+uygulanmadi. Bu kontrol canli Letterboxd taramasi, gercek TMDB tokeni veya Windows
+kurulum paketinin yeniden kurulmasini kapsamiyor.
 
 ## Calisan kisimlar
 

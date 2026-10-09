@@ -8,6 +8,7 @@ import { promisify } from "node:util";
 import { XMLParser } from "fast-xml-parser";
 import { load } from "cheerio";
 import JSZip from "jszip";
+import { enforceRequestPolicy } from "./server/request-policy.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const distDir = process.env.TASTETWIN_DIST_DIR
@@ -51,6 +52,7 @@ await Promise.all([restoreBridgeCache(), restoreTmdbCache(), restoreScanState()]
 
 const server = createServer(async (req, res) => {
   try {
+    if (!enforceRequestPolicy(req, res, server.address().port)) return;
     const url = new URL(req.url ?? "/", `http://${req.headers.host ?? "127.0.0.1"}`);
 
     if (url.pathname === "/api/extension/request-scan" && req.method === "POST") {
@@ -423,10 +425,15 @@ const server = createServer(async (req, res) => {
       return;
     }
 
+    if (url.pathname.startsWith("/api/")) {
+      sendJson(res, 404, { error: "unknown_endpoint" });
+      return;
+    }
     await serveStatic(url.pathname, res);
   } catch (error) {
-    console.error(error);
-    sendJson(res, 500, { error: error instanceof Error ? error.message : "server_error" });
+    const status = error.statusCode ?? 500;
+    if (status === 500) console.error(error);
+    sendJson(res, status, { error: error instanceof Error ? error.message : "server_error" });
   }
 });
 
@@ -437,7 +444,7 @@ await new Promise((resolve, reject) => {
   };
   const onListening = () => {
     server.off("error", onError);
-    console.log(`TasteTwin live server: http://127.0.0.1:${port}/`);
+    console.log(`TasteTwin live server: http://127.0.0.1:${server.address().port}/`);
     resolve();
   };
   server.once("error", onError);
@@ -452,8 +459,9 @@ async function fetchLetterboxdUser(rawHandle) {
   }
 
   const response = await fetch(`https://letterboxd.com/${encodeURIComponent(handle)}/rss/`, {
+    signal: AbortSignal.timeout(20000),
     headers: {
-      "User-Agent": "TasteTwin/0.2 (+local app)",
+      "User-Agent": "TasteTwin/0.5 (+local app)",
       Accept: "application/rss+xml, application/xml;q=0.9, */*;q=0.8",
     },
   });
@@ -465,7 +473,11 @@ async function fetchLetterboxdUser(rawHandle) {
   const xml = await response.text();
   const parsed = parser.parse(xml);
   const channel = parsed?.rss?.channel;
-  const items = toArray(channel?.item);
+  if (!channel) throw new Error(`Letterboxd returned an invalid RSS feed for ${handle}`);
+  // Profile feeds also contain lists. They must never become fictitious films.
+  const items = toArray(channel.item)
+    .filter(item => text(item["letterboxd:filmTitle"]))
+    .sort((a, b) => (Date.parse(text(b.pubDate)) || 0) - (Date.parse(text(a.pubDate)) || 0));
   const displayName = String(channel?.title ?? handle).replace(/^Letterboxd\s+-\s+/i, "") || handle;
   const byKey = new Map();
 
@@ -473,10 +485,9 @@ async function fetchLetterboxdUser(rawHandle) {
     const film = filmFromRssItem(item);
     const current = byKey.get(film.key);
     if (current) {
-      current.rating = Math.max(current.rating ?? 0, film.rating ?? 0) || current.rating;
-      current.liked = current.liked || film.liked;
+      // Newest entry was inserted first. An older higher rating is not the current rating.
       current.rewatches += film.rewatches;
-      current.watchedDates = [...new Set([...current.watchedDates, ...film.watchedDates])];
+      current.watchedDates.push(...film.watchedDates);
       current.review = current.review || film.review;
       current.posterUrl = current.posterUrl || film.posterUrl;
       if (Date.parse(film.activityDate ?? "") > Date.parse(current.activityDate ?? "")) {
@@ -490,7 +501,7 @@ async function fetchLetterboxdUser(rawHandle) {
   const films = [...byKey.values()].sort((a, b) => (b.rating ?? 0) - (a.rating ?? 0));
   const activity = calculateActivity(films);
   return {
-    metadataVersion: 2,
+    metadataVersion: 3,
     id: `rss-${handle}`,
     handle,
     displayName,
@@ -883,7 +894,7 @@ function filmFromRssItem(item) {
   const tmdbId = text(item["tmdb:movieId"]);
   const link = text(item.link);
   const rating = number(text(item["letterboxd:memberRating"]));
-  const liked = /^yes$/i.test(text(item["letterboxd:memberLike"])) || (rating ?? 0) >= 4;
+  const liked = /^yes$/i.test(text(item["letterboxd:memberLike"]));
   const rewatch = /^yes$/i.test(text(item["letterboxd:rewatch"])) ? 1 : 0;
   const description = text(item.description);
   const posterUrl = description.match(/<img[^>]+src="([^"]+)"/i)?.[1];
@@ -1217,7 +1228,7 @@ async function serveStatic(pathname, res) {
   const cleanPath = pathname === "/" ? "/index.html" : pathname;
   const filePath = path.join(distDir, cleanPath);
   const resolved = path.resolve(filePath);
-  if (!resolved.startsWith(path.resolve(distDir))) {
+  if (resolved !== path.resolve(distDir) && !resolved.startsWith(`${path.resolve(distDir)}${path.sep}`)) {
     sendText(res, 403, "Forbidden", "text/plain");
     return;
   }
@@ -1235,7 +1246,6 @@ function sendText(res, status, body, contentType) {
   res.writeHead(status, {
     "Content-Type": contentType,
     "Cache-Control": "no-store",
-    "Access-Control-Allow-Origin": "*",
   });
   res.end(body);
 }
@@ -1243,15 +1253,28 @@ function sendText(res, status, body, contentType) {
 function readJsonBody(req) {
   return new Promise((resolve, reject) => {
     let body = "";
+    let bytes = 0;
+    let failed = false;
+    req.setEncoding("utf8");
     req.on("data", (chunk) => {
+      if (failed) return;
+      bytes += Buffer.byteLength(chunk);
+      if (bytes > 4 * 1024 * 1024) {
+        failed = true;
+        body = "";
+        reject(Object.assign(new Error("Bridge payload too large"), { statusCode: 413 }));
+        return;
+      }
       body += chunk;
-      if (body.length > 4 * 1024 * 1024) reject(new Error("Bridge payload too large"));
     });
     req.on("end", () => {
+      if (failed) return;
       try {
-        resolve(JSON.parse(body || "{}"));
+        const parsed = JSON.parse(body || "{}");
+        if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error("Object required");
+        resolve(parsed);
       } catch {
-        reject(new Error("Invalid JSON body"));
+        reject(Object.assign(new Error("Invalid JSON body"), { statusCode: 400 }));
       }
     });
     req.on("error", reject);

@@ -174,6 +174,7 @@ export function pickNextWatch(
 
 export function isWatched(film: FilmSignal) {
   return (
+    film.watched === true ||
     film.rating !== undefined ||
     film.watchedDates.length > 0 ||
     film.rewatches > 0 ||

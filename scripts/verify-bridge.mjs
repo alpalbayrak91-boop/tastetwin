@@ -1,19 +1,9 @@
-import { spawn } from "node:child_process";
-import { rm } from "node:fs/promises";
-import path from "node:path";
-import { fileURLToPath } from "node:url";
+import { createTestServer } from "./test-server.mjs";
 
-const root = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
-const testDirectory = path.join(root, ".codex-test-bridge");
-const port = 5191;
-const baseUrl = `http://127.0.0.1:${port}`;
-let child;
-
-if (!testDirectory.startsWith(`${root}${path.sep}`)) throw new Error("Unsafe bridge test directory");
+const server = await createTestServer();
+let baseUrl = server.url;
 
 try {
-  await rm(testDirectory, { recursive: true, force: true });
-  child = await startServer();
   const scanRequest = await fetch(`${baseUrl}/api/extension/request-scan`, {
     method: "POST",
     headers: { "Content-Type": "application/json", "X-TasteTwin-Request": "app" },
@@ -63,8 +53,8 @@ try {
     }),
   });
   if (!bridgeResponse.ok) throw new Error(`Bridge POST failed: ${bridgeResponse.status}`);
-  await stopServer(child);
-  child = await startServer();
+  await server.start();
+  baseUrl = server.url;
 
   const social = await fetch(`${baseUrl}/api/letterboxd/social?handle=tastetwincheck`).then((response) => response.json());
   const network = await fetch(`${baseUrl}/api/letterboxd/network?handle=tastetwincheck&limit=120`).then((response) => response.json());
@@ -82,8 +72,7 @@ try {
   }
   console.log(JSON.stringify({ restored: true, automaticHandoff: true, following: 3, followers: 2, networkNodes: 7, weightedConnections: true, checkedAt: social.checkedAt }));
 } finally {
-  if (child && child.exitCode === null) await stopServer(child);
-  await rm(testDirectory, { recursive: true, force: true });
+  await server.dispose();
 }
 
 function member(username) {
@@ -98,40 +87,4 @@ function candidate(username, via, followingCount, weight) {
     via: [via],
     viaDetails: [{ username: via, displayName: via, followingCount, weight }],
   };
-}
-
-function startServer() {
-  return new Promise((resolve, reject) => {
-    const processChild = spawn(process.execPath, [path.join(root, "server.mjs")], {
-      cwd: root,
-      env: { ...process.env, PORT: String(port), TASTETWIN_DATA_DIR: testDirectory },
-      stdio: ["ignore", "pipe", "pipe"],
-    });
-    const timer = setTimeout(() => reject(new Error("Bridge test server did not start")), 10000);
-    processChild.stdout.setEncoding("utf8");
-    processChild.stdout.on("data", (text) => {
-      if (!text.includes("TasteTwin live server")) return;
-      clearTimeout(timer);
-      resolve(processChild);
-    });
-    processChild.stderr.setEncoding("utf8");
-    processChild.stderr.on("data", (text) => {
-      if (text.trim()) console.error(text.trim());
-    });
-    processChild.on("error", (error) => {
-      clearTimeout(timer);
-      reject(error);
-    });
-  });
-}
-
-function stopServer(processChild) {
-  return new Promise((resolve) => {
-    if (processChild.exitCode !== null) {
-      resolve();
-      return;
-    }
-    processChild.once("exit", resolve);
-    processChild.kill();
-  });
 }

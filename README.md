@@ -12,6 +12,8 @@ TasteTwin is a local-first Letterboxd social graph and movie taste matching app.
 - Compares the imported archive with recent public RSS activity from other members.
 - Lets the user independently filter whether they follow a person and whether that person follows them.
 - Opens each match into a rated common-film and divergence breakdown.
+- Shows a paginated watch-together shortlist with maximum-runtime and shared-watchlist filters, bilingual reasons and Letterboxd links.
+- Exports every person matching the current social filters to a local CSV, across all pages, with taste evidence and relationship directions.
 - Combines social and two-hop network scanning in one extension action while saving the social stage first.
 - Provides numeric filters, sorting, pagination, weighted mutual connections, and recent film-activity signals.
 - Selects everyone matching the current social filters and saves them into separate follow/unfollow review lists.
@@ -64,6 +66,36 @@ Windows may show an unknown publisher warning until the installer is code-signed
 npm install
 npm run desktop
 ```
+
+For browser development, run `npm start` for the local API on port 5173 and
+`npm run dev` in a second terminal for Vite on port 5174. Vite proxies `/api`
+to the backend; `TASTETWIN_API_URL` can override the proxy target.
+
+Run the regression checks:
+
+```powershell
+npm test
+npx playwright install chromium --only-shell
+npm run test:browser
+```
+
+`npm test` checks imports, scoring, recommendations, social export, API access
+rules, Vite forwarding and bridge persistence. `test:browser` builds the app
+and desktop server, then checks import/reload, backups, social pagination,
+review queues, CSV downloads and watch-together filters in Chromium at desktop
+and mobile sizes. Test servers use random ports and temporary data directories
+under `.codex-artifacts`; they do not connect to the running app's data.
+
+The local API rejects unrelated website origins, unexpected Host headers and
+non-JSON writes. Installed Chrome-extension origins remain supported because
+unpacked extension IDs depend on the installation; set
+`TASTETWIN_EXTENSION_ORIGINS` to a comma-separated list of exact
+`chrome-extension://...` origins to narrow this further. This is a browser
+access boundary, not authentication against other local programs.
+
+Import fixes apply to newly imported exports. Reimport the original export to
+correct older diary dates, rewatch counts or ratings; the app cannot reconstruct
+those source distinctions from a previously merged archive.
 
 Create a Windows installer:
 

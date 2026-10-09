@@ -11,7 +11,7 @@ export async function readLetterboxdExport(file: File, preferredHandle = ""): Pr
   const rowsByKind: Partial<Record<FileKind, CsvRow[]>> = {};
 
   if (file.name.toLowerCase().endsWith(".zip")) {
-    const zip = await JSZip.loadAsync(file);
+    const zip = await JSZip.loadAsync(await file.arrayBuffer());
     const entries = Object.values(zip.files).filter((entry) => !entry.dir && entry.name.toLowerCase().endsWith(".csv"));
     for (const entry of entries) {
       const kind = inferKind(entry.name);
@@ -26,6 +26,7 @@ export async function readLetterboxdExport(file: File, preferredHandle = ""): Pr
   }
 
   const films = mergeRows(rowsByKind);
+  if (!films.length) throw new Error("No film records found in this export");
   const cleanName = file.name.replace(/\.(zip|csv)$/i, "").replace(/letterboxd[-_\s]?/i, "");
   const profileHandle = findProfileHandle(rowsByKind.profile ?? []);
   const handle = normalizeHandle(preferredHandle) || profileHandle || normalizeHandle(cleanName) || "you";
@@ -130,6 +131,19 @@ function normalizeHeader(header: string) {
 
 function mergeRows(rowsByKind: Partial<Record<FileKind, CsvRow[]>>) {
   const byKey = new Map<string, FilmSignal>();
+  const filmRows = (kind: FileKind) => (rowsByKind[kind] ?? []).filter((row) => first(row, "name", "title", "film"));
+  const currentRatings = new Set<string>();
+  const latestRatingDates = new Map<string, string>();
+  const diaryFilms = new Set<string>();
+
+  const applyDatedRating = (film: FilmSignal, row: CsvRow) => {
+    const rating = parseRating(first(row, "rating"));
+    const date = first(row, "watched_date", "date");
+    if (rating !== undefined && !currentRatings.has(film.key) && date >= (latestRatingDates.get(film.key) ?? "")) {
+      film.rating = rating;
+      latestRatingDates.set(film.key, date);
+    }
+  };
 
   const ensure = (row: CsvRow) => {
     const title = first(row, "name", "title", "film") || "Untitled";
@@ -154,44 +168,46 @@ function mergeRows(rowsByKind: Partial<Record<FileKind, CsvRow[]>>) {
     return film;
   };
 
-  for (const row of rowsByKind.ratings ?? []) {
+  for (const row of filmRows("ratings")) {
     const film = ensure(row);
     const rating = parseRating(first(row, "rating"));
     if (rating !== undefined) {
       film.rating = rating;
-      film.liked = rating >= 4;
+      currentRatings.add(film.key);
     }
   }
 
-  for (const row of rowsByKind.diary ?? []) {
+  for (const row of filmRows("diary")) {
     const film = ensure(row);
-    const rating = parseRating(first(row, "rating"));
-    if (rating !== undefined) film.rating = rating;
-    pushUnique(film.watchedDates, first(row, "watched_date", "date"));
+    film.watched = true;
+    diaryFilms.add(film.key);
+    applyDatedRating(film, row);
+    const date = first(row, "watched_date");
+    if (date) film.watchedDates.push(date);
     if (isTrue(first(row, "rewatch"))) film.rewatches += 1;
   }
 
-  for (const row of rowsByKind.reviews ?? []) {
+  for (const row of filmRows("reviews")) {
     const film = ensure(row);
-    const rating = parseRating(first(row, "rating"));
-    if (rating !== undefined) film.rating = rating;
+    film.watched = true;
+    applyDatedRating(film, row);
     const review = first(row, "review", "body", "text");
     if (review) film.review = review;
-    pushUnique(film.watchedDates, first(row, "watched_date", "date"));
-    if (isTrue(first(row, "rewatch"))) film.rewatches += 1;
+    pushUnique(film.watchedDates, first(row, "watched_date"));
+    if (!diaryFilms.has(film.key) && isTrue(first(row, "rewatch"))) film.rewatches += 1;
   }
 
-  for (const row of rowsByKind.watched ?? []) {
+  for (const row of filmRows("watched")) {
     const film = ensure(row);
-    pushUnique(film.watchedDates, first(row, "watched_date", "date"));
+    film.watched = true;
   }
 
-  for (const row of rowsByKind.watchlist ?? []) {
+  for (const row of filmRows("watchlist")) {
     const film = ensure(row);
     film.watchlist = true;
   }
 
-  for (const row of rowsByKind.likes ?? []) {
+  for (const row of filmRows("likes")) {
     const film = ensure(row);
     film.liked = true;
   }
@@ -209,8 +225,8 @@ function first(row: CsvRow, ...keys: string[]) {
 function parseRating(value: string) {
   if (!value) return undefined;
   const normalized = value.replace(",", ".").replace("½", ".5");
-  const rating = Number.parseFloat(normalized);
-  return Number.isFinite(rating) ? Math.max(0, Math.min(5, rating)) : undefined;
+  const rating = Number(normalized);
+  return Number.isFinite(rating) && rating >= 0.5 && rating <= 5 && Number.isInteger(rating * 2) ? rating : undefined;
 }
 
 function parseInteger(value: string) {

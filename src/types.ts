@@ -8,6 +8,7 @@ export type FilmSignal = {
   rating?: number;
   liked?: boolean;
   review?: string;
+  watched?: boolean;
   watchedDates: string[];
   rewatches: number;
   watchlist?: boolean;
@@ -47,6 +48,7 @@ export type UserTaste = {
   activity90Days?: number;
   activityScore?: number;
   importedAt: string;
+  rssUpdatedAt?: string;
   source: "rss" | "upload";
   films: FilmSignal[];
 };
@@ -82,6 +84,7 @@ export type MatchResult = {
     candidateRating?: number;
     fitScore?: number;
     reason?: string;
+    signal?: "recommendation" | "keyword" | "director" | "genre" | "country";
   };
 };
 

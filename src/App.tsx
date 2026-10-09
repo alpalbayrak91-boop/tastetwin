@@ -31,7 +31,13 @@ import {
 } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import { t } from "./i18n";
+import { version as appVersion } from "../package.json";
+import { version as extensionVersion } from "../extension/manifest.json";
+import { WatchTogetherPanel } from "./components/WatchTogetherPanel";
+import { socialDirectoryCsv } from "./lib/social-export";
+import { togetherPickReason } from "./lib/watch-together";
 import { readLetterboxdExport } from "./lib/letterboxd";
+import { mergeFilmArchive, preserveFilmMetadata } from "./lib/film-archive";
 import {
   filterAndSortMatches,
   paginateMatches,
@@ -159,6 +165,7 @@ export default function App() {
   const [users, setUsers] = useState<UserTaste[]>(loadStoredUsers);
   const [activeId, setActiveId] = useState(() => localStorage.getItem("tastetwin.active") ?? "");
   const [accountHandle, setAccountHandle] = useState(() => localStorage.getItem("tastetwin.handle") ?? "");
+  const [profileQuery, setProfileQuery] = useState("");
   const [minCommon, setMinCommon] = useState(0);
   const [minSharedLoves, setMinSharedLoves] = useState(0);
   const [maxDivergences, setMaxDivergences] = useState(9999);
@@ -366,7 +373,8 @@ export default function App() {
     let cancelled = false;
     loadPersistentState<PersistentAppState>(PERSISTENT_STATE_KEY)
       .then((saved) => {
-        if (cancelled || !saved) return;
+        if (cancelled) return;
+        if (!saved) { setStorageReady(true); return; }
         if (Array.isArray(saved.users)) setUsers(saved.users.map(deriveUserActivity));
         if (typeof saved.activeId === "string") setActiveId(saved.activeId);
         if (typeof saved.accountHandle === "string") setAccountHandle(saved.accountHandle);
@@ -384,10 +392,11 @@ export default function App() {
             // Ignore malformed pre-0.4 queue data.
           }
         }
-      })
-      .catch((error) => console.warn("TasteTwin IndexedDB restore failed", error))
-      .finally(() => {
         if (!cancelled) setStorageReady(true);
+      })
+      .catch((error) => {
+        console.warn("TasteTwin IndexedDB restore failed", error);
+        if (!cancelled) setStatus("Yerel veri açılamadı. Verinin üzerine yazılmadı; diğer TasteTwin pencerelerini kapatıp yeniden aç. / Local data could not be opened; close other TasteTwin windows and reopen.");
       });
     return () => {
       cancelled = true;
@@ -409,7 +418,10 @@ export default function App() {
         localStorage.removeItem("tastetwin.users");
         localStorage.removeItem("tastetwin.social");
       })
-      .catch((error) => console.warn("TasteTwin IndexedDB save failed", error));
+      .catch((error) => {
+        console.warn("TasteTwin IndexedDB save failed", error);
+        setStatus("Veri kaydedilemedi; uygulamayı kapatmadan yedek dışa aktar. / Data could not be saved; export a backup before closing.");
+      });
   }, [users, activeId, accountHandle, socialByHandle, managementQueuesByHandle, storageReady]);
 
   useEffect(() => {
@@ -482,11 +494,18 @@ export default function App() {
   }, [accountHandle, activeUser?.handle, language]);
 
   async function handleUpload(file?: File) {
-    if (!file) return;
+    if (!file || !storageReady) return;
     setStatus("");
     try {
-      const imported = deriveUserActivity(await readLetterboxdExport(file, accountHandle));
+      const imported = deriveUserActivity(preserveFilmMetadata(await readLetterboxdExport(file, accountHandle), uploadedUser));
       const nextUsers = [imported, ...users.filter((user) => user.source !== "upload")];
+      await savePersistentState<PersistentAppState>(PERSISTENT_STATE_KEY, {
+        users: nextUsers,
+        activeId: imported.id,
+        accountHandle,
+        socialByHandle,
+        managementQueuesByHandle,
+      });
       setUsers(nextUsers);
       setActiveId(imported.id);
       setTab("overview");
@@ -501,11 +520,36 @@ export default function App() {
     }
   }
 
+  async function refreshOwnActivity() {
+    const handle = (uploadedUser?.handle || accountHandle).trim().toLowerCase();
+    if (!handle || loading || !storageReady) return;
+    setLoading(true);
+    try {
+      const response = await fetch(`/api/letterboxd/rss?handles=${encodeURIComponent(handle)}`);
+      const payload = await response.json();
+      const incoming = payload.users?.[0] as UserTaste | undefined;
+      if (!response.ok || !incoming) throw new Error(payload.errors?.[0]?.message || "RSS unavailable");
+      setUsers(current => {
+        const previous = current.find(user => user.handle.toLowerCase() === handle && user.source === "upload")
+          ?? current.find(user => user.handle.toLowerCase() === handle);
+        const refreshed = deriveUserActivity(mergeFilmArchive(previous, incoming));
+        return [refreshed, ...current.filter(user => user.id !== refreshed.id)];
+      });
+      setStatus(language === "tr"
+        ? `${incoming.films.length} yakın tarihli film kaydı arşivle birleştirildi. RSS tam geçmişi ve watchlist değişikliklerini kapsamaz; bunlar için güncel ZIP yükle.`
+        : `${incoming.films.length} recent film records merged into the archive. RSS does not cover your full history or watchlist changes; upload a fresh ZIP for those.`);
+    } catch (error) {
+      setStatus(language === "tr" ? `Son aktivite alınamadı: ${String(error)}` : `Could not refresh activity: ${String(error)}`);
+    } finally {
+      setLoading(false);
+    }
+  }
+
   function exportLocalBackup() {
     const backup: TasteTwinBackup = {
       format: "tastetwin-backup",
       schemaVersion: 1,
-      appVersion: "0.4.0",
+      appVersion,
       exportedAt: new Date().toISOString(),
       state: {
         users,
@@ -530,7 +574,7 @@ export default function App() {
   }
 
   async function importLocalBackup(file?: File) {
-    if (!file) return;
+    if (!file || !storageReady) return;
     try {
       if (file.size > 250 * 1024 * 1024) throw new Error("backup_too_large");
       const backup = JSON.parse(await file.text()) as Partial<TasteTwinBackup>;
@@ -545,20 +589,26 @@ export default function App() {
         throw new Error("invalid_backup");
       }
       const restoredUsers = state.users.map(deriveUserActivity);
+      const restoredActiveId = typeof state.activeId === "string" && restoredUsers.some((user) => user.id === state.activeId)
+        ? state.activeId : restoredUsers[0]?.id ?? "";
+      const restoredHandle = typeof state.accountHandle === "string" ? state.accountHandle : "";
+      await savePersistentState<PersistentAppState>(PERSISTENT_STATE_KEY, {
+        users: restoredUsers,
+        activeId: restoredActiveId,
+        accountHandle: restoredHandle,
+        socialByHandle: state.socialByHandle ?? {},
+        managementQueuesByHandle: state.managementQueuesByHandle ?? {},
+      });
       setUsers(restoredUsers);
-      setActiveId(
-        typeof state.activeId === "string" && restoredUsers.some((user) => user.id === state.activeId)
-          ? state.activeId
-          : restoredUsers[0]?.id ?? "",
-      );
-      setAccountHandle(typeof state.accountHandle === "string" ? state.accountHandle : "");
+      setActiveId(restoredActiveId);
+      setAccountHandle(restoredHandle);
       setSocialByHandle(state.socialByHandle ?? {});
       setManagementQueuesByHandle(state.managementQueuesByHandle ?? {});
       setTab("overview");
       setStatus(
         language === "tr"
-          ? `Yedek geri yuklendi: ${restoredUsers.length} profil. Veriler bu bilgisayardaki uygulama deposuna kaydediliyor.`
-          : `Backup restored: ${restoredUsers.length} profiles. Data is being saved to this computer's app storage.`,
+          ? `Yedek geri yuklendi: ${restoredUsers.length} profil. Veriler bu bilgisayardaki uygulama deposuna kaydedildi.`
+          : `Backup restored: ${restoredUsers.length} profiles. Data has been saved to this computer's app storage.`,
       );
     } catch {
       setStatus(
@@ -870,7 +920,7 @@ export default function App() {
     try {
       const response = await fetch("/api/system/prepare-extension", {
         method: "POST",
-        headers: { "X-TasteTwin-Request": "app" },
+        headers: { "Content-Type": "application/json", "X-TasteTwin-Request": "app" },
       });
       const payload = await response.json();
       if (!response.ok || typeof payload.path !== "string") {
@@ -1217,8 +1267,13 @@ export default function App() {
         <label className="upload-button" title={t(language, "import")}>
           <FileUp size={18} />
           <span>{language === "tr" ? "Tam film arsivi ZIP" : "Full film archive ZIP"}</span>
-          <input type="file" accept=".zip,.csv,text/csv" onChange={(event) => handleUpload(event.target.files?.[0])} />
+          <input type="file" accept=".zip,.csv,text/csv" disabled={!storageReady} onChange={(event) => handleUpload(event.target.files?.[0])} />
         </label>
+
+        <button className="browser-scan-button" onClick={refreshOwnActivity} disabled={loading || !storageReady || !accountHandle}>
+          <RefreshCcw size={16} /><span>{language === "tr" ? "Son film aktivitelerimi güncelle" : "Refresh my recent films"}</span>
+        </button>
+        <a href="https://letterboxd.com/settings/data/" target="_blank" rel="noreferrer">{language === "tr" ? "Letterboxd’dan güncel ZIP al" : "Get a fresh Letterboxd ZIP"}</a>
 
         <details className="backup-settings">
           <summary>
@@ -1237,7 +1292,7 @@ export default function App() {
           <label className="browser-scan-button backup-import-button">
             <FileUp size={17} />
             <span>{language === "tr" ? "Yedegi geri yukle" : "Restore backup"}</span>
-            <input type="file" accept=".json,application/json" onChange={(event) => importLocalBackup(event.target.files?.[0])} />
+            <input type="file" accept=".json,application/json" disabled={!storageReady} onChange={(event) => importLocalBackup(event.target.files?.[0])} />
           </label>
         </details>
 
@@ -1267,12 +1322,13 @@ export default function App() {
               {t(language, "chooseProfile")}
             </label>
             <select id="profile-select" value={activeUser?.id ?? ""} onChange={(event) => setActiveId(event.target.value)}>
-              {users.map((user) => (
+              {[...new Map([...(activeUser ? [activeUser] : []), ...users.filter(user => `${user.handle} ${user.displayName}`.toLocaleLowerCase().includes(profileQuery.toLocaleLowerCase())).slice(0, 100)].map(user => [user.id, user])).values()].map((user) => (
                 <option key={user.id} value={user.id}>
                   {user.displayName}
                 </option>
               ))}
             </select>
+            {users.length > 100 && <input aria-label={language === "tr" ? "Profil ara" : "Search profiles"} placeholder={language === "tr" ? `${users.length.toLocaleString("tr")} profilde ara…` : `Search ${users.length.toLocaleString("en")} profiles…`} value={profileQuery} onChange={event => setProfileQuery(event.target.value)} />}
           </>
         )}
 
@@ -1285,7 +1341,7 @@ export default function App() {
             EN
           </button>
         </div>
-        <small className="build-version">TasteTwin 0.4.0 · extension 0.2.2</small>
+        <small className="build-version">TasteTwin {appVersion} · extension {extensionVersion}</small>
 
         {status && <p className="status-line">{status}</p>}
       </aside>
@@ -1548,8 +1604,10 @@ export default function App() {
           </>
         )}
       </main>
-      {selectedMatch && (
+      {selectedMatch && activeUser && (
         <MatchDetail
+          key={selectedMatch.user.id}
+          target={activeUser}
           language={language}
           match={selectedMatch}
           avatarUrl={selectedMatch.user.avatarUrl || avatarByHandle.get(selectedMatch.user.handle.toLowerCase())}
@@ -2449,6 +2507,21 @@ function SocialDirectory({
         </span>
         <button
           className="browser-scan-button"
+          disabled={!filtered.length}
+          onClick={() => {
+            const url = URL.createObjectURL(new Blob([socialDirectoryCsv(filtered, language)], { type: "text/csv;charset=utf-8" }));
+            const link = document.createElement("a");
+            link.href = url;
+            link.download = `tastetwin-social-${data.handle}-${new Date().toISOString().slice(0, 10)}.csv`;
+            link.click();
+            window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+          }}
+        >
+          <Download size={16} />
+          {language === "tr" ? `Filtrelenenleri CSV indir (${filtered.length})` : `Export filtered CSV (${filtered.length})`}
+        </button>
+        <button
+          className="browser-scan-button"
           disabled={loading || !missingActivity.length}
           onClick={() => onLoadActivity(missingActivity.map((entry) => entry.username), missingActivityMembers)}
         >
@@ -3182,16 +3255,23 @@ function MatchCard({
 }
 
 function MatchDetail({
+  target,
   language,
   match,
   avatarUrl,
   onClose,
 }: {
+  target: UserTaste;
   language: Language;
   match: MatchResult;
   avatarUrl?: string;
   onClose: () => void;
 }) {
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => { if (event.key === "Escape") onClose(); };
+    document.addEventListener("keydown", onKeyDown);
+    return () => document.removeEventListener("keydown", onKeyDown);
+  }, [onClose]);
   return (
     <div className="match-dialog-backdrop" role="presentation" onMouseDown={onClose}>
       <section
@@ -3231,20 +3311,7 @@ function MatchDetail({
             : `${match.commonCount} co-rated films, ${match.confidence}% validity. Raw affinity ${match.rawScore}; repeated-split penalty -${match.divergencePenalty}; local niche score ${match.nicheScore}/100. Sparse evidence pulls the score toward 50. Watchlist and unrated films are excluded.`}
         </p>
 
-        {match.togetherPick && (
-          <div className="together-pick detail-together-pick">
-            <span>{language === "tr" ? "Birlikte izleyin" : "Watch together"}</span>
-            <strong>{match.togetherPick.film.title}</strong>
-            <small>
-              {match.togetherPick.reason ||
-                (match.togetherPick.kind === "mutual-watchlist"
-                  ? language === "tr" ? "Film ikinizin de watchlistinde." : "The film is on both watchlists."
-                  : match.togetherPick.kind === "your-watchlist-they-loved"
-                    ? language === "tr" ? "Senin watchlistinde; bu kisi filmi sevdi." : "On your watchlist; this person loved it."
-                    : language === "tr" ? "Ortak zevkinize en yakin watchlist adayi." : "The closest watchlist fit for your shared taste.")}
-            </small>
-          </div>
-        )}
+        <WatchTogetherPanel target={target} match={match} language={language} />
 
         <div className="detail-section">
           <h3>{language === "tr" ? "Ortak filmler ve puanlar" : "Common films and ratings"}</h3>
@@ -3476,15 +3543,7 @@ function reasonLines(match: MatchResult, language: Language) {
     );
   }
   if (match.togetherPick) {
-    lines.push(
-      tr
-        ? match.togetherPick.kind === "mutual-watchlist"
-          ? `Ikimizin da watchlistinde: ${match.togetherPick.film.title}.`
-          : `Senin watchlistinde, ${match.user.displayName} tarafindan yuksek puanlanmis: ${match.togetherPick.film.title}.`
-        : match.togetherPick.kind === "mutual-watchlist"
-          ? `On both watchlists: ${match.togetherPick.film.title}.`
-          : `On your watchlist and highly rated by ${match.user.displayName}: ${match.togetherPick.film.title}.`,
-    );
+    lines.push(`${match.togetherPick.film.title}: ${togetherPickReason(match.togetherPick, language)}`);
   }
   return lines.length ? lines : match.reasons;
 }
@@ -3717,7 +3776,7 @@ function mergeRssUsers(current: UserTaste[], incoming: UserTaste[]) {
       .map((user) => [user.handle.toLowerCase(), user]),
   );
   for (const user of incoming) {
-    rss.set(user.handle.toLowerCase(), deriveUserActivity(user));
+    rss.set(user.handle.toLowerCase(), deriveUserActivity(mergeFilmArchive(rss.get(user.handle.toLowerCase()), user)));
   }
   return [...uploaded, ...rss.values()];
 }
@@ -3906,7 +3965,9 @@ function ScanStatusPanel({
       ? language === "tr"
         ? "Tarama kesilmis gorunuyor."
         : "The scan looks interrupted."
-      : progress?.text || (language === "tr" ? "Tarama kesildi." : "The scan stopped.")
+      : progress?.state === "interrupted"
+        ? (language === "tr" ? "Önceki tarama yarım kaldı." : "The previous scan was interrupted.")
+        : progress?.text || (language === "tr" ? "Tarama kesildi." : "The scan stopped.")
     : progress?.text || (language === "tr" ? "Tarama durumu" : "Scan status");
 
   return (

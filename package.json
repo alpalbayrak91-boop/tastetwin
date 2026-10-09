@@ -8,6 +8,11 @@
   "main": "electron/main.cjs",
   "type": "module",
   "scripts": {
+    "test": "npm run test:unit && npm run test:bridge",
+    "test:unit": "node scripts/test-core.mjs && node scripts/test-conversations.mjs",
+    "test:bridge": "node scripts/verify-bridge.mjs && node --test tests/api.test.mjs",
+    "test:browser": "npm run build && node scripts/test-browser.mjs",
+    "test:storage": "node scripts/test-storage.mjs",
     "dev": "vite --host 127.0.0.1",
     "package-extension": "node scripts/package-extension.mjs",
     "build": "npm run package-extension && tsc -b && vite build && node scripts/build-desktop-server.mjs",
@@ -34,6 +39,7 @@
     "@types/react-dom": "^19.0.2",
     "electron": "^43.2.0",
     "esbuild": "^0.28.1",
+    "playwright": "^1.63.0",
     "typescript": "^5.7.2"
   }
 }

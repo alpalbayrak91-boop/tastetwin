@@ -645,7 +645,7 @@ async function fetchPage(url, relationship) {
         "Kullanici adi degismis veya hesap kapanmis olabilir.",
       );
     }
-    if (![403, 429].includes(response.status) || attempt === RETRY_DELAYS_MS.length) {
+    if (response.status !== 429 || attempt === RETRY_DELAYS_MS.length) {
       if (response.status === 429) {
         throw new ScanFailure(
           "rate-limited",
@@ -666,7 +666,9 @@ async function fetchPage(url, relationship) {
         "Biraz bekleyip kaldigin yerden devam et.",
       );
     }
-    const waitMs = RETRY_DELAYS_MS[attempt];
+    const retryAfter = response.headers.get("Retry-After");
+    const retryAt = retryAfter && !/^\d+$/.test(retryAfter) ? Date.parse(retryAfter) - Date.now() : Number(retryAfter) * 1000;
+    const waitMs = Math.max(RETRY_DELAYS_MS[attempt], Number.isFinite(retryAt) ? retryAt : 0);
     notify({
       ...(lastProgress ?? {}),
       state: "retry",

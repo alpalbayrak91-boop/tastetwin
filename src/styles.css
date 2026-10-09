@@ -3011,3 +3011,51 @@ select {
 .scan-status-done .scan-status-bar > i {
   background: #0e766e;
 }
+.together-controls, .together-pagination {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 12px;
+  margin: 14px 0;
+}
+
+.together-controls label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  font-size: 13px;
+}
+
+.together-controls select, .together-pagination button {
+  padding: 8px 10px;
+  border: 1px solid #d6d1c7;
+  border-radius: 8px;
+  background: #fffdf7;
+  color: #222;
+}
+
+.together-planner .together-pick {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: start;
+  gap: 6px 14px;
+  margin-bottom: 10px;
+  padding: 12px 14px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #fffdf7;
+}
+.together-planner .together-pick > * { min-width: 0; overflow-wrap: anywhere; }
+.together-planner .together-pick > span { grid-column: 1; font-size: 12px; }
+.together-planner .together-pick > strong { grid-column: 1; text-align: left; }
+.together-planner .together-pick > small,
+.together-planner .together-pick > p { grid-column: 1 / -1; }
+.together-planner .together-pick p { margin: 6px 0; font-size: 13px; }
+.together-planner .together-pick a { grid-column: 2; grid-row: 1 / 3; align-self: center; font-size: 13px; color: #186049; }
+.together-pagination button:disabled { opacity: 0.45; }
+
+@media (max-width: 720px) {
+  .together-planner .together-pick { display: flex; flex-direction: column; align-items: stretch; }
+  .together-planner .together-pick a { align-self: flex-start; }
+}
