@@ -29,12 +29,13 @@ import {
   Users,
   X,
 } from "lucide-react";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { t } from "./i18n";
 import { version as appVersion } from "../package.json";
 import { version as extensionVersion } from "../extension/manifest.json";
 import { WatchTogetherPanel } from "./components/WatchTogetherPanel";
 import { socialDirectoryCsv } from "./lib/social-export";
+import { computeFollowerChanges, followerEventsCsv, summarizeFollowerEvents, type FollowerEvent, type FollowerSnapshot } from "./lib/follower-history";
 import { togetherPickReason } from "./lib/watch-together";
 import { readLetterboxdExport } from "./lib/letterboxd";
 import { mergeFilmArchive, preserveFilmMetadata } from "./lib/film-archive";
@@ -113,6 +114,8 @@ type SocialData =
       fans: SocialMember[];
       lostFollowers: SocialMember[];
       newFollowers: SocialMember[];
+      /** Name-level follower changes across every complete scan, newest last. */
+      followerEvents?: FollowerEvent[];
       network?: {
         nodes: number;
         edges: number;
@@ -139,7 +142,21 @@ type TasteTwinBackup = {
   appVersion: string;
   exportedAt: string;
   state: PersistentAppState;
+  /** Follower comparison baselines; optional so pre-0.6 backups still restore. */
+  followerBaselines?: Record<string, unknown>;
 };
+
+type CloudBackupStatus = {
+  folder?: string;
+  folderAvailable: boolean;
+  backupDirectory?: string;
+  latest?: { savedAt: string; bytes: number };
+  candidates: Array<{ provider: string; folder: string }>;
+};
+
+const FOLLOWER_BASELINE_PREFIX = "tastetwin.followers.";
+const CLOUD_BACKUP_DELAY_MS = 60 * 1000;
+const appRequestHeaders = { "Content-Type": "application/json", "X-TasteTwin-Request": "app" };
 
 const PERSISTENT_STATE_KEY = "app";
 
@@ -191,6 +208,15 @@ export default function App() {
   const [socialLoading, setSocialLoading] = useState(false);
   const [socialByHandle, setSocialByHandle] = useState<Record<string, SocialData>>(loadStoredSocial);
   const [managementQueuesByHandle, setManagementQueuesByHandle] = useState<Record<string, SocialManagementQueues>>({});
+  const [cloudBackup, setCloudBackup] = useState<CloudBackupStatus>();
+  const [cloudFolderInput, setCloudFolderInput] = useState("");
+  const [cloudBusy, setCloudBusy] = useState(false);
+  const [cloudAuto, setCloudAuto] = useState(() => localStorage.getItem("tastetwin.cloudAuto") !== "off");
+  // Folder this computer has already synced with. Until then automatic backups
+  // stay off, so a fresh install never overwrites another computer's backup.
+  const [cloudLinked, setCloudLinked] = useState(() => localStorage.getItem("tastetwin.cloudLinked") ?? "");
+  const socialByHandleRef = useRef(socialByHandle);
+  socialByHandleRef.current = socialByHandle;
   const [copied, setCopied] = useState(false);
   const [preparedExtensionPath, setPreparedExtensionPath] = useState("");
   const [tmdbToken, setTmdbToken] = useState(() => localStorage.getItem("tastetwin.tmdbToken") ?? "");
@@ -429,7 +455,7 @@ export default function App() {
       if (event.origin !== "https://letterboxd.com" || event.data?.type !== "TASTETWIN_SOCIAL") return;
       const payload = socialFromBrowserMessage(event.data);
       if (!payload) return;
-      const enriched = addFollowerChanges(payload.handle, payload);
+      const enriched = addFollowerChanges(payload.handle, payload, socialByHandleRef.current[payload.handle]);
       setAccountHandle(payload.handle);
       setSocialByHandle((current) => ({ ...current, [payload.handle]: enriched }));
       setTab("social");
@@ -545,8 +571,18 @@ export default function App() {
     }
   }
 
-  function exportLocalBackup() {
-    const backup: TasteTwinBackup = {
+  function buildBackup(): TasteTwinBackup {
+    const followerBaselines: Record<string, unknown> = {};
+    for (let index = 0; index < localStorage.length; index += 1) {
+      const key = localStorage.key(index);
+      if (!key?.startsWith(FOLLOWER_BASELINE_PREFIX)) continue;
+      try {
+        followerBaselines[key.slice(FOLLOWER_BASELINE_PREFIX.length)] = JSON.parse(localStorage.getItem(key) ?? "null");
+      } catch {
+        // A damaged baseline is rebuilt from the saved social scan.
+      }
+    }
+    return {
       format: "tastetwin-backup",
       schemaVersion: 1,
       appVersion,
@@ -558,7 +594,12 @@ export default function App() {
         socialByHandle,
         managementQueuesByHandle,
       },
+      followerBaselines,
     };
+  }
+
+  function exportLocalBackup() {
+    const backup = buildBackup();
     const blob = new Blob([JSON.stringify(backup)], { type: "application/json" });
     const url = URL.createObjectURL(blob);
     const link = document.createElement("a");
@@ -577,39 +618,7 @@ export default function App() {
     if (!file || !storageReady) return;
     try {
       if (file.size > 250 * 1024 * 1024) throw new Error("backup_too_large");
-      const backup = JSON.parse(await file.text()) as Partial<TasteTwinBackup>;
-      const state = backup.state;
-      if (
-        backup.format !== "tastetwin-backup" ||
-        backup.schemaVersion !== 1 ||
-        !state ||
-        !Array.isArray(state.users) ||
-        typeof state.socialByHandle !== "object"
-      ) {
-        throw new Error("invalid_backup");
-      }
-      const restoredUsers = state.users.map(deriveUserActivity);
-      const restoredActiveId = typeof state.activeId === "string" && restoredUsers.some((user) => user.id === state.activeId)
-        ? state.activeId : restoredUsers[0]?.id ?? "";
-      const restoredHandle = typeof state.accountHandle === "string" ? state.accountHandle : "";
-      await savePersistentState<PersistentAppState>(PERSISTENT_STATE_KEY, {
-        users: restoredUsers,
-        activeId: restoredActiveId,
-        accountHandle: restoredHandle,
-        socialByHandle: state.socialByHandle ?? {},
-        managementQueuesByHandle: state.managementQueuesByHandle ?? {},
-      });
-      setUsers(restoredUsers);
-      setActiveId(restoredActiveId);
-      setAccountHandle(restoredHandle);
-      setSocialByHandle(state.socialByHandle ?? {});
-      setManagementQueuesByHandle(state.managementQueuesByHandle ?? {});
-      setTab("overview");
-      setStatus(
-        language === "tr"
-          ? `Yedek geri yuklendi: ${restoredUsers.length} profil. Veriler bu bilgisayardaki uygulama deposuna kaydedildi.`
-          : `Backup restored: ${restoredUsers.length} profiles. Data has been saved to this computer's app storage.`,
-      );
+      await restoreBackup(JSON.parse(await file.text()) as Partial<TasteTwinBackup>);
     } catch {
       setStatus(
         language === "tr"
@@ -618,6 +627,145 @@ export default function App() {
       );
     }
   }
+
+  async function restoreBackup(backup: Partial<TasteTwinBackup>) {
+    const state = backup.state;
+    if (
+      backup.format !== "tastetwin-backup" ||
+      backup.schemaVersion !== 1 ||
+      !state ||
+      !Array.isArray(state.users) ||
+      typeof state.socialByHandle !== "object"
+    ) {
+      throw new Error("invalid_backup");
+    }
+    const restoredUsers = state.users.map(deriveUserActivity);
+    const restoredActiveId = typeof state.activeId === "string" && restoredUsers.some((user) => user.id === state.activeId)
+      ? state.activeId : restoredUsers[0]?.id ?? "";
+    const restoredHandle = typeof state.accountHandle === "string" ? state.accountHandle : "";
+    await savePersistentState<PersistentAppState>(PERSISTENT_STATE_KEY, {
+      users: restoredUsers,
+      activeId: restoredActiveId,
+      accountHandle: restoredHandle,
+      socialByHandle: state.socialByHandle ?? {},
+      managementQueuesByHandle: state.managementQueuesByHandle ?? {},
+    });
+    setUsers(restoredUsers);
+    setActiveId(restoredActiveId);
+    setAccountHandle(restoredHandle);
+    setSocialByHandle(state.socialByHandle ?? {});
+    setManagementQueuesByHandle(state.managementQueuesByHandle ?? {});
+    if (backup.followerBaselines && typeof backup.followerBaselines === "object") {
+      for (const [handle, baseline] of Object.entries(backup.followerBaselines)) {
+        if (/^[a-z0-9_-]{1,32}$/.test(handle) && baseline && typeof baseline === "object") {
+          localStorage.setItem(`${FOLLOWER_BASELINE_PREFIX}${handle}`, JSON.stringify(baseline));
+        }
+      }
+    }
+    setTab("overview");
+    setStatus(
+      language === "tr"
+        ? `Yedek geri yuklendi: ${restoredUsers.length} profil. Veriler bu bilgisayardaki uygulama deposuna kaydedildi.`
+        : `Backup restored: ${restoredUsers.length} profiles. Data has been saved to this computer's app storage.`,
+    );
+  }
+
+  useEffect(() => {
+    fetch("/api/system/cloud-backup", { headers: appRequestHeaders })
+      .then((response) => (response.ok ? response.json() : undefined))
+      .then((status: CloudBackupStatus | undefined) => {
+        if (!status) return;
+        setCloudBackup(status);
+        setCloudFolderInput(status.folder ?? status.candidates[0]?.folder ?? "");
+      })
+      .catch(() => undefined);
+  }, []);
+
+  async function saveCloudFolder(folder: string) {
+    setCloudBusy(true);
+    try {
+      const response = await fetch("/api/system/cloud-backup/config", { method: "POST", headers: appRequestHeaders, body: JSON.stringify({ folder }) });
+      const payload = await response.json();
+      if (!response.ok) throw new Error(payload.error);
+      setCloudBackup(payload);
+      setStatus(
+        folder
+          ? language === "tr"
+            ? `Bulut yedek klasoru ayarlandi: ${payload.backupDirectory}. Senkron uygulaman (Google Drive, OneDrive...) bu klasoru buluta yukler.`
+            : `Cloud backup folder set: ${payload.backupDirectory}. Your sync app (Google Drive, OneDrive...) uploads it.`
+          : language === "tr" ? "Bulut yedegi kapatildi." : "Cloud backup turned off.",
+      );
+      if (folder && !payload.latest) {
+        await backupToCloud(true, payload.folder);
+      } else if (folder) {
+        setStatus(
+          language === "tr"
+            ? `Bu klasorde ${new Date(payload.latest.savedAt).toLocaleString("tr-TR")} tarihli bir yedek var. Baska bilgisayardan geliyorsa "Buluttan geri yukle", bu bilgisayardaki veri daha yeniyse "Simdi yedekle" sec.`
+            : `This folder already has a backup from ${new Date(payload.latest.savedAt).toLocaleString("en-US")}. Use "Restore from cloud" if it came from another computer, or "Back up now" if this computer's data is newer.`,
+        );
+      }
+    } catch (error) {
+      const code = error instanceof Error ? error.message : "";
+      setStatus(
+        language === "tr"
+          ? code === "folder_not_found" ? "Bu klasor bulunamadi. Tam yolu yaz (or. G:\\My Drive)." : "Klasor kaydedilemedi; tam yol yazmalisin."
+          : code === "folder_not_found" ? "Folder not found. Enter the full path (e.g. G:\\My Drive)." : "Folder could not be saved; enter a full path.",
+      );
+    } finally {
+      setCloudBusy(false);
+    }
+  }
+
+  async function backupToCloud(quiet = false, folder = cloudBackup?.folder) {
+    try {
+      const response = await fetch("/api/system/cloud-backup", { method: "POST", headers: appRequestHeaders, body: JSON.stringify(buildBackup()) });
+      const payload = await response.json();
+      if (!response.ok) throw new Error(payload.error);
+      setCloudBackup((current) => current && { ...current, latest: { savedAt: payload.savedAt, bytes: payload.bytes } });
+      markCloudLinked(folder);
+      if (!quiet) {
+        setStatus(language === "tr" ? `Bulut klasorune yedeklendi: ${payload.directory}` : `Backed up to the cloud folder: ${payload.directory}`);
+      }
+    } catch {
+      setStatus(
+        language === "tr"
+          ? "Bulut klasorune yedek yazilamadi. Klasor hala var mi, disk dolu mu kontrol et."
+          : "Could not write the cloud-folder backup. Check that the folder still exists and has space.",
+      );
+    }
+  }
+
+  async function restoreFromCloud() {
+    const confirmed = window.confirm(
+      language === "tr"
+        ? "Bulut klasorundeki son yedek bu bilgisayardaki TasteTwin verisinin yerine gecsin mi?"
+        : "Replace this computer's TasteTwin data with the latest backup from the cloud folder?",
+    );
+    if (!confirmed) return;
+    setCloudBusy(true);
+    try {
+      const response = await fetch("/api/system/cloud-backup/latest", { headers: appRequestHeaders });
+      if (!response.ok) throw new Error("backup_not_found");
+      await restoreBackup(await response.json());
+      markCloudLinked(cloudBackup?.folder);
+    } catch {
+      setStatus(language === "tr" ? "Bulut klasorunde gecerli bir TasteTwin yedegi bulunamadi." : "No valid TasteTwin backup found in the cloud folder.");
+    } finally {
+      setCloudBusy(false);
+    }
+  }
+
+  function markCloudLinked(folder = "") {
+    localStorage.setItem("tastetwin.cloudLinked", folder);
+    setCloudLinked(folder);
+  }
+
+  // Back up after changes settle, so a long scan writes once instead of every few seconds.
+  useEffect(() => {
+    if (!storageReady || !cloudAuto || !cloudBackup?.folder || cloudLinked !== cloudBackup.folder || !users.length) return;
+    const timer = window.setTimeout(() => void backupToCloud(true), CLOUD_BACKUP_DELAY_MS);
+    return () => window.clearTimeout(timer);
+  }, [users, socialByHandle, managementQueuesByHandle, storageReady, cloudAuto, cloudBackup?.folder, cloudLinked]);
 
   async function fetchSocialData(source: "extension" | "public" = "extension") {
     const handle = (accountHandle || activeUser?.handle || "").trim().replace(/^@/, "").toLowerCase();
@@ -635,7 +783,7 @@ export default function App() {
         const errorCode = "error" in payload ? payload.error : "social_fetch_failed";
         throw new Error(errorCode);
       }
-      const enriched = addFollowerChanges(handle, payload);
+      const enriched = addFollowerChanges(handle, payload, socialByHandleRef.current[handle]);
       setSocialByHandle((current) => {
         const existing = current[handle];
         if (
@@ -762,7 +910,7 @@ export default function App() {
         if (!response.ok) continue;
         const payload = (await response.json()) as SocialData;
         if (!payload.available || Date.parse(payload.checkedAt) < Date.parse(requestedAt)) continue;
-        const enriched = addFollowerChanges(handle, payload);
+        const enriched = addFollowerChanges(handle, payload, socialByHandleRef.current[handle]);
         setSocialByHandle((current) => ({ ...current, [handle]: enriched }));
         setTab("social");
         if (!socialReceived) {
@@ -1055,7 +1203,14 @@ export default function App() {
   function resetFollowerHistory() {
     const handle = (accountHandle || activeUser?.handle || "").toLowerCase();
     if (!handle) return;
-    localStorage.removeItem(`tastetwin.followers.${handle}`);
+    const confirmed = window.confirm(
+      language === "tr"
+        ? "Takipci gecmisi (kim ne zaman takip etti/cikti) ve karsilastirma baslangici silinsin mi? Once yedek almak istersen Iptal'e bas."
+        : "Delete the follower history (who followed or unfollowed and when) and the comparison baseline? Press Cancel to back up first.",
+    );
+    if (!confirmed) return;
+    // A marker, not a removal: otherwise the last saved scan would be reused as the baseline.
+    localStorage.setItem(`tastetwin.followers.${handle}`, JSON.stringify({ reset: true }));
     setSocialByHandle((current) => {
       const social = current[handle];
       if (!social?.available) return current;
@@ -1066,6 +1221,8 @@ export default function App() {
           previousCheckedAt: undefined,
           lostFollowers: [],
           newFollowers: [],
+          followerEvents: [],
+          history: [],
         },
       };
     });
@@ -1294,6 +1451,79 @@ export default function App() {
             <span>{language === "tr" ? "Yedegi geri yukle" : "Restore backup"}</span>
             <input type="file" accept=".json,application/json" disabled={!storageReady} onChange={(event) => importLocalBackup(event.target.files?.[0])} />
           </label>
+          {cloudBackup && (
+            <div className="cloud-backup">
+              <strong>{language === "tr" ? "Kisisel bulut yedegi" : "Personal cloud backup"}</strong>
+              <p>
+                {language === "tr"
+                  ? "Google Drive, OneDrive, iCloud veya Dropbox masaustu uygulamasinin senkron klasorunu sec. TasteTwin yedegi oraya yazar, senkron uygulaman buluta yukler; baska bilgisayarda ayni klasorden geri yuklersin. Hesap sifresi veya token istenmez."
+                  : "Pick the sync folder of the Google Drive, OneDrive, iCloud or Dropbox desktop app. TasteTwin writes the backup there and your sync app uploads it; restore from the same folder on another computer. No account password or token is needed."}
+              </p>
+              {cloudBackup.candidates.length > 0 && (
+                <div className="cloud-candidates">
+                  {cloudBackup.candidates.map((candidate) => (
+                    <button key={candidate.folder} className="cloud-chip" onClick={() => setCloudFolderInput(candidate.folder)} title={candidate.folder}>
+                      {candidate.provider}
+                    </button>
+                  ))}
+                </div>
+              )}
+              <div className="cloud-folder-row">
+                <input
+                  value={cloudFolderInput}
+                  onChange={(event) => setCloudFolderInput(event.target.value)}
+                  placeholder={language === "tr" ? "Klasorun tam yolu, or. G:\\My Drive" : "Full folder path, e.g. G:\\My Drive"}
+                  aria-label={language === "tr" ? "Bulut yedek klasoru" : "Cloud backup folder"}
+                />
+                <button className="browser-scan-button" disabled={cloudBusy || !cloudFolderInput.trim()} onClick={() => saveCloudFolder(cloudFolderInput)}>
+                  {language === "tr" ? "Kaydet" : "Save"}
+                </button>
+              </div>
+              {cloudBackup.folder && (
+                <>
+                  <p className="muted-line">
+                    {cloudBackup.backupDirectory}
+                    {!cloudBackup.folderAvailable && (language === "tr" ? " (su an bulunamiyor)" : " (currently missing)")}
+                    {" · "}
+                    {cloudBackup.latest
+                      ? `${language === "tr" ? "Son yedek" : "Last backup"}: ${new Date(cloudBackup.latest.savedAt).toLocaleString(language === "tr" ? "tr-TR" : "en-US")} (${(cloudBackup.latest.bytes / 1024 / 1024).toFixed(1)} MB)`
+                      : language === "tr" ? "Henuz yedek yok" : "No backup yet"}
+                  </p>
+                  <label className="cloud-auto">
+                    <input
+                      type="checkbox"
+                      checked={cloudAuto}
+                      onChange={(event) => {
+                        setCloudAuto(event.target.checked);
+                        localStorage.setItem("tastetwin.cloudAuto", event.target.checked ? "on" : "off");
+                      }}
+                    />
+                    {language === "tr" ? "Degisikliklerden 1 dakika sonra otomatik yedekle (son 14 gun saklanir)" : "Back up automatically a minute after changes (keeps 14 days)"}
+                  </label>
+                  {cloudAuto && cloudLinked !== cloudBackup.folder && (
+                    <p className="muted-line">
+                      {language === "tr"
+                        ? "Otomatik yedek, bu bilgisayar klasorle bir kez eslesince (Simdi yedekle veya Buluttan geri yukle) baslar."
+                        : "Automatic backups start once this computer has synced with the folder (Back up now or Restore from cloud)."}
+                    </p>
+                  )}
+                  <div className="cloud-folder-row">
+                    <button className="browser-scan-button" disabled={cloudBusy || !users.length} onClick={() => backupToCloud()}>
+                      <Download size={16} />
+                      <span>{language === "tr" ? "Simdi yedekle" : "Back up now"}</span>
+                    </button>
+                    <button className="browser-scan-button" disabled={cloudBusy || !cloudBackup.latest || !storageReady} onClick={restoreFromCloud}>
+                      <FileUp size={16} />
+                      <span>{language === "tr" ? "Buluttan geri yukle" : "Restore from cloud"}</span>
+                    </button>
+                    <button className="browser-scan-button" disabled={cloudBusy} onClick={() => saveCloudFolder("")}>
+                      {language === "tr" ? "Kapat" : "Turn off"}
+                    </button>
+                  </div>
+                </>
+              )}
+            </div>
+          )}
         </details>
 
         <div className="source-summary">
@@ -2198,6 +2428,7 @@ function SocialPanel({
           <span>{language === "tr" ? "Takip gecmisini sifirla" : "Reset follow history"}</span>
         </button>
       </div>
+      <FollowerTimeline language={language} handle={data.handle} events={data.followerEvents ?? []} />
       {data.warning && (
         <p className="social-note">
           {language === "tr"
@@ -3643,96 +3874,102 @@ function cleanSocialMembers(value: unknown): SocialMember[] | undefined {
   return [...members.values()];
 }
 
-function addFollowerChanges(handle: string, payload: AvailableSocialData): AvailableSocialData {
+function FollowerTimeline({ language, handle, events }: { language: Language; handle: string; events: FollowerEvent[] }) {
+  const [kind, setKind] = useState<"all" | FollowerEvent["kind"]>("all");
+  const [visible, setVisible] = useState(30);
+  const locale = language === "tr" ? "tr-TR" : "en-US";
+  const summary = useMemo(() => summarizeFollowerEvents(events), [events]);
+  const shown = useMemo(
+    () => [...events].reverse().filter((event) => kind === "all" || event.kind === kind),
+    [events, kind],
+  );
+  if (!events.length) return null;
+  function downloadCsv() {
+    const url = URL.createObjectURL(new Blob([followerEventsCsv(events, language)], { type: "text/csv;charset=utf-8" }));
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = `tastetwin-takipci-gecmisi-${handle}-${new Date().toISOString().slice(0, 10)}.csv`;
+    link.click();
+    window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+  }
+  return (
+    <div className="panel follower-timeline">
+      <div className="follower-timeline-head">
+        <div>
+          <h2>{language === "tr" ? "Takipci gecmisi" : "Follower history"}</h2>
+          <p className="muted-line">
+            {language === "tr"
+              ? `${summary.followed} takip, ${summary.unfollowed} takipten cikma kaydi. Tarih, degisikligi ilk goren taramadir; asil an iki tarama arasindadir.`
+              : `${summary.followed} follows and ${summary.unfollowed} unfollows recorded. The date is the scan that first saw the change; it happened between two scans.`}
+            {summary.repeatPeople > 0 && (language === "tr"
+              ? ` ${summary.repeatPeople} kisi birden fazla kez gidip geldi.`
+              : ` ${summary.repeatPeople} people changed more than once.`)}
+          </p>
+        </div>
+        <div className="follower-timeline-actions">
+          <select value={kind} onChange={(event) => { setKind(event.target.value as typeof kind); setVisible(30); }}>
+            <option value="all">{language === "tr" ? "Tumu" : "All"}</option>
+            <option value="followed">{language === "tr" ? "Takip edenler" : "Followed"}</option>
+            <option value="unfollowed">{language === "tr" ? "Takipten cikanlar" : "Unfollowed"}</option>
+          </select>
+          <button className="browser-scan-button" onClick={downloadCsv}>
+            <Download size={16} />
+            <span>CSV</span>
+          </button>
+        </div>
+      </div>
+      <ol className="follower-timeline-list">
+        {shown.slice(0, visible).map((event) => (
+          <li key={`${event.username}-${event.kind}-${event.detectedAt}`} className={event.kind}>
+            <b>{event.kind === "followed" ? "+" : "−"}</b>
+            <a href={`https://letterboxd.com/${encodeURIComponent(event.username)}/`} target="_blank" rel="noreferrer">
+              {event.displayName}
+            </a>
+            <small>@{event.username}</small>
+            <time title={event.since ? `${new Date(event.since).toLocaleString(locale)} – ${new Date(event.detectedAt).toLocaleString(locale)}` : undefined}>
+              {new Date(event.detectedAt).toLocaleDateString(locale)}
+            </time>
+          </li>
+        ))}
+      </ol>
+      {shown.length > visible && (
+        <button className="browser-scan-button" onClick={() => setVisible((count) => count + 100)}>
+          {language === "tr" ? `Daha fazla (${shown.length - visible})` : `Show more (${shown.length - visible})`}
+        </button>
+      )}
+    </div>
+  );
+}
+
+function addFollowerChanges(handle: string, payload: AvailableSocialData, saved?: SocialData): AvailableSocialData {
   const key = `tastetwin.followers.${handle}`;
-  type FollowerSnapshot = {
-    checkedAt: string;
-    followers: SocialMember[];
-    scanStage?: AvailableSocialData["scanStage"];
-    comparisonPreviousCheckedAt?: string;
-    lostFollowers?: SocialMember[];
-    newFollowers?: SocialMember[];
-    history?: AvailableSocialData["history"];
-  };
   let previous: FollowerSnapshot | undefined;
+  let resetRequested = false;
   try {
-    previous = JSON.parse(localStorage.getItem(key) ?? "null") ?? undefined;
+    const stored = JSON.parse(localStorage.getItem(key) ?? "null");
+    resetRequested = stored?.reset === true;
+    previous = Array.isArray(stored?.followers) ? stored : undefined;
   } catch {
     previous = undefined;
   }
-
-  if (payload.complete === false) {
-    return {
-      ...payload,
-      previousCheckedAt: previous?.checkedAt,
-      lostFollowers: [],
-      newFollowers: [],
-      history: previous?.history ?? [],
+  const savedSocial = saved?.available ? saved : undefined;
+  // After a backup restore or on a new computer the browser snapshot is missing;
+  // the last complete scan saved in app storage is the same baseline.
+  if (!previous && !resetRequested && savedSocial && savedSocial.complete !== false && savedSocial.followers.length) {
+    previous = {
+      checkedAt: savedSocial.checkedAt,
+      followers: savedSocial.followers,
+      scanStage: savedSocial.scanStage,
+      comparisonPreviousCheckedAt: savedSocial.previousCheckedAt,
+      lostFollowers: savedSocial.lostFollowers,
+      newFollowers: savedSocial.newFollowers,
+      history: savedSocial.history,
     };
   }
-
-  const currentNames = new Set(payload.followers.map((member) => member.username.toLowerCase()));
-  const sameFollowers =
-    previous?.followers.length === payload.followers.length &&
-    previous.followers.every((member) => currentNames.has(member.username.toLowerCase()));
-  if (
-    payload.scanStage === "network-complete" &&
-    previous?.scanStage === "social-complete" &&
-    sameFollowers
-  ) {
-    const history = [...(previous.history ?? [])];
-    const latest = history[history.length - 1];
-    if (latest) latest.networkCandidates = payload.network?.candidateCount;
-    const snapshot: FollowerSnapshot = {
-      ...previous,
-      checkedAt: payload.checkedAt,
-      scanStage: "network-complete",
-      history,
-    };
-    localStorage.setItem(key, JSON.stringify(snapshot));
-    return {
-      ...payload,
-      previousCheckedAt: previous.comparisonPreviousCheckedAt,
-      lostFollowers: previous.lostFollowers ?? [],
-      newFollowers: previous.newFollowers ?? [],
-      history,
-    };
-  }
-
-  const previousNames = new Set((previous?.followers ?? []).map((member) => member.username.toLowerCase()));
-  const lostFollowers = previous?.followers.filter((member) => !currentNames.has(member.username.toLowerCase())) ?? [];
-  const newFollowers = previous
-    ? payload.followers.filter((member) => !previousNames.has(member.username.toLowerCase()))
-    : [];
-  const history = [
-    ...(previous?.history ?? []),
-    {
-      checkedAt: payload.checkedAt,
-      following: payload.counts.following,
-      followers: payload.counts.followers,
-      mutuals: payload.counts.mutuals,
-      newFollowers: newFollowers.length,
-      lostFollowers: lostFollowers.length,
-      networkCandidates: payload.network?.candidateCount,
-    },
-  ].slice(-50);
-
-  localStorage.setItem(key, JSON.stringify({
-    checkedAt: payload.checkedAt,
-    followers: payload.followers,
-    scanStage: payload.scanStage,
-    comparisonPreviousCheckedAt: previous?.checkedAt,
-    lostFollowers,
-    newFollowers,
-    history,
-  } satisfies FollowerSnapshot));
-  return {
-    ...payload,
-    previousCheckedAt: previous?.checkedAt,
-    lostFollowers,
-    newFollowers,
-    history,
-  };
+  const previousEvents = resetRequested ? [] : savedSocial?.followerEvents ?? [];
+  const { changes, snapshot } = computeFollowerChanges(payload, previous, previousEvents);
+  if (snapshot) localStorage.setItem(key, JSON.stringify(snapshot));
+  return { ...payload, ...changes };
 }
 
 function loadStoredUsers(): UserTaste[] {

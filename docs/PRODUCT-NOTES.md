@@ -1,6 +1,15 @@
 # TasteTwin urun ve teknik notlari
 
-Son guncelleme: 26 Eylul 2026
+Son guncelleme: 9 Ekim 2026
+
+## 9 Ekim 2026 - Takipci gecmisi ve kisisel bulut yedegi
+
+- Takipci gecmisi isim bazinda: her tam taramada kim takip etti / birakti, hangi iki tarama arasinda. Filtre ve CSV var; sosyal veriyle birlikte saklanir ve yedege girer.
+- Ag asamasi surerken ayni sosyal sonucun tekrar islenmesi yeni/cikan listelerini sifirliyordu; duzeltildi ve testlendi.
+- Yedek takipci karsilastirma baslangicini da tasir. Yeni bilgisayarda son tam tarama baslangic sayilir.
+- Kisisel bulut: TasteTwin kendi bulutunu calistirmaz. Kullanici Google Drive/OneDrive/iCloud/Dropbox senkron klasorunu secer; yedek oraya yazilir, senkron uygulamasi yukler. 14 gunluk kopya tutulur. Ilk eslesmeden once otomatik yazma yoktur.
+- Internet/web surumu yok: yerel sunucu ve eklenti koprusu 127.0.0.1'e bagli. Web'e tasima hesap sistemi, sunucu depolamasi ve veri merkezi IP'lerinden Letterboxd erisimi gerektirir.
+
 
 ## 26 Eylul 2026 - Dogruluk ve birlikte izleme guncellemesi
 

@@ -1,5 +1,7 @@
 import { createRequire } from "node:module";
-import { readFile } from "node:fs/promises";
+import { mkdtemp, readdir, readFile, rm } from "node:fs/promises";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 
 const require = createRequire(import.meta.url);
 const { chromium } = require("playwright");
@@ -7,7 +9,7 @@ const screenshotPath = process.env.TASTETWIN_SCREENSHOT ?? "tastetwin-verified.p
 const appUrl = process.env.TASTETWIN_APP_URL;
 if (!appUrl) throw new Error("Use npm run test:browser to run against isolated test data");
 const { version: appVersion } = JSON.parse(await readFile(new URL("../package.json", import.meta.url), "utf8"));
-const browser = await chromium.launch({ headless: true });
+const browser = await chromium.launch({ headless: true, executablePath: process.env.TASTETWIN_CHROMIUM_PATH || undefined });
 const page = await browser.newPage({ viewport: { width: 1440, height: 1000 } });
 const consoleErrors = [];
 
@@ -209,6 +211,26 @@ if (
   "tmdbToken" in backup
 ) {
   throw new Error("Local backup export is incomplete or leaked a token");
+}
+if (typeof backup.followerBaselines !== "object") throw new Error("Backup is missing follower baselines");
+
+// Personal cloud backup: a sync-client folder (simulated by a temp folder) receives the backup and restores it.
+const cloudFolder = await mkdtemp(path.join(path.dirname(fileURLToPath(import.meta.url)), "..", ".codex-artifacts", "cloud-ui-"));
+try {
+  await page.getByLabel("Bulut yedek klasoru").fill(cloudFolder);
+  await page.locator(".cloud-backup").getByRole("button", { name: "Kaydet", exact: true }).click();
+  await page.getByText(/Son yedek:/).waitFor();
+  const cloudFiles = await readdir(path.join(cloudFolder, "TasteTwin"));
+  if (!cloudFiles.includes("tastetwin-latest.json")) throw new Error("Cloud folder backup was not written");
+  const cloudCopy = JSON.parse(await readFile(path.join(cloudFolder, "TasteTwin", "tastetwin-latest.json"), "utf8"));
+  if (cloudCopy.state.users.length !== 56 || "tmdbToken" in cloudCopy) throw new Error("Cloud folder backup is incomplete or leaked a token");
+  page.once("dialog", (dialog) => dialog.accept());
+  await page.getByRole("button", { name: "Buluttan geri yukle" }).click();
+  await page.getByText(/Yedek geri yuklendi: 56 profil/).waitFor();
+  await page.locator(".cloud-backup").getByRole("button", { name: "Kapat", exact: true }).click();
+  await page.getByText("Bulut yedegi kapatildi.").waitFor();
+} finally {
+  await rm(cloudFolder, { recursive: true, force: true });
 }
 await page.locator(".film-data-health").waitFor();
 if (!(await page.locator(".film-data-health").innerText()).includes("film TMDB verili")) {

@@ -3059,3 +3059,132 @@ select {
   .together-planner .together-pick { display: flex; flex-direction: column; align-items: stretch; }
   .together-planner .together-pick a { align-self: flex-start; }
 }
+
+.follower-timeline-head {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  gap: 12px;
+  align-items: flex-start;
+}
+
+.follower-timeline h2 {
+  margin: 0 0 4px;
+}
+
+.follower-timeline-actions {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+.follower-timeline-list {
+  list-style: none;
+  margin: 12px 0;
+  padding: 0;
+  display: grid;
+  gap: 4px;
+}
+
+.follower-timeline-list li {
+  display: grid;
+  grid-template-columns: 20px minmax(0, 1fr) auto auto;
+  gap: 8px;
+  align-items: baseline;
+  padding: 6px 8px;
+  border-left: 3px solid var(--line);
+  background: #fffdf7;
+}
+
+.follower-timeline-list li a {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.follower-timeline-list li.followed {
+  border-left-color: var(--green);
+}
+
+.follower-timeline-list li.followed b {
+  color: var(--green);
+}
+
+.follower-timeline-list li.unfollowed {
+  border-left-color: var(--red);
+}
+
+.follower-timeline-list li.unfollowed b {
+  color: var(--red);
+}
+
+@media (max-width: 640px) {
+  .follower-timeline-list li {
+    grid-template-columns: 20px minmax(0, 1fr) auto;
+  }
+  .follower-timeline-list li small {
+    display: none;
+  }
+}
+
+.cloud-backup {
+  box-sizing: border-box;
+  width: calc(100% - 20px);
+  min-width: 0;
+  margin: 12px 10px 0;
+  padding-top: 10px;
+  border-top: 1px solid var(--line);
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 8px;
+}
+
+.cloud-backup > strong {
+  font-size: 0.9rem;
+}
+
+.backup-settings .cloud-backup p {
+  padding: 0;
+}
+
+.cloud-candidates,
+.cloud-folder-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.cloud-folder-row input {
+  flex: 1 1 100%;
+  min-width: 0;
+  box-sizing: border-box;
+  min-height: 36px;
+  padding: 6px 8px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+}
+
+.cloud-folder-row .browser-scan-button {
+  flex: 1 1 auto;
+}
+
+.cloud-backup .muted-line {
+  overflow-wrap: anywhere;
+}
+
+.cloud-chip {
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: #fffdf7;
+  padding: 4px 10px;
+  font-size: 0.8rem;
+  cursor: pointer;
+}
+
+.cloud-auto {
+  display: flex;
+  gap: 8px;
+  align-items: flex-start;
+  font-size: 0.82rem;
+  color: var(--muted);
+}

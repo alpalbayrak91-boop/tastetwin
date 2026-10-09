@@ -1,7 +1,9 @@
 import { after, before, test } from "node:test";
 import assert from "node:assert/strict";
 import { request } from "node:http";
-import { createTestServer } from "../scripts/test-server.mjs";
+import { mkdtemp, readdir, rm } from "node:fs/promises";
+import path from "node:path";
+import { createTestServer, root } from "../scripts/test-server.mjs";
 import { createServer as createViteServer } from "vite";
 
 let server;
@@ -79,5 +81,41 @@ test("Vite development server forwards API requests to the local backend", async
     await vite?.close();
     if (previous === undefined) delete process.env.TASTETWIN_API_URL;
     else process.env.TASTETWIN_API_URL = previous;
+  }
+});
+
+test("cloud backup folder receives app backups and serves the latest one back", async () => {
+  const folder = await mkdtemp(path.join(root, ".codex-artifacts", "cloud-"));
+  const app = { "Content-Type": "application/json", "X-TasteTwin-Request": "app" };
+  try {
+    const extension = { ...app, Origin: `chrome-extension://${"a".repeat(32)}` };
+    assert.equal((await fetch(server.url + "/api/system/cloud-backup", { headers: extension })).status, 403);
+    assert.equal((await fetch(server.url + "/api/system/cloud-backup")).status, 403, "the app header is required");
+    const relative = await fetch(server.url + "/api/system/cloud-backup/config", { method: "POST", headers: app, body: JSON.stringify({ folder: "relative/dir" }) });
+    assert.equal(relative.status, 400);
+    assert.equal((await fetch(server.url + "/api/system/cloud-backup", { method: "POST", headers: app, body: "{}" })).status, 409);
+
+    const configured = await fetch(server.url + "/api/system/cloud-backup/config", { method: "POST", headers: app, body: JSON.stringify({ folder }) });
+    assert.equal(configured.status, 200);
+    assert.equal((await configured.json()).folder, path.resolve(folder));
+    assert.equal((await fetch(server.url + "/api/system/cloud-backup", { method: "POST", headers: app, body: JSON.stringify({ format: "other" }) })).status, 400);
+
+    const backup = { format: "tastetwin-backup", schemaVersion: 1, state: { users: [], socialByHandle: {} }, padding: "x".repeat(5 * 1024 * 1024) };
+    const written = await fetch(server.url + "/api/system/cloud-backup", { method: "POST", headers: app, body: JSON.stringify(backup) });
+    assert.equal(written.status, 200, "backups above the 4 MB bridge limit are accepted");
+    const files = await readdir(path.join(folder, "TasteTwin"));
+    assert.ok(files.includes("tastetwin-latest.json"));
+    assert.ok(files.some((name) => /^tastetwin-\d{4}-\d{2}-\d{2}\.json$/.test(name)));
+    assert.ok(!files.some((name) => name.endsWith(".tmp")));
+
+    const latest = await fetch(server.url + "/api/system/cloud-backup/latest", { headers: app });
+    assert.equal(latest.status, 200);
+    assert.equal((await latest.json()).padding.length, backup.padding.length);
+    const status = await (await fetch(server.url + "/api/system/cloud-backup", { headers: app })).json();
+    assert.ok(status.latest.bytes > 5 * 1024 * 1024);
+    assert.ok(Array.isArray(status.candidates));
+  } finally {
+    await fetch(server.url + "/api/system/cloud-backup/config", { method: "POST", headers: app, body: JSON.stringify({ folder: "" }) });
+    await rm(folder, { recursive: true, force: true });
   }
 });

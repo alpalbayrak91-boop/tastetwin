@@ -18,7 +18,7 @@ export function socialDirectoryCsv(entries: SocialDirectoryEntry[], language: La
   return "\uFEFF" + [headings, ...rows].map((row) => row.map(csvCell).join(",")).join("\r\n") + "\r\n";
 }
 
-function csvCell(value: string | number) {
+export function csvCell(value: string | number) {
   let text = String(value);
   // Quoting alone does not stop spreadsheet formula execution.
   if (/^[\s\uFEFF]*[=+@-]/.test(text) || /^[\t\r\n]/.test(text)) text = `'${text}`;

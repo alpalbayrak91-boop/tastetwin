@@ -26,6 +26,8 @@ TasteTwin is a local-first Letterboxd social graph and movie taste matching app.
 - Picks a taste-based, short, or random next watch from unwatched watchlist entries with a synopsis and reason.
 - Keeps imported and scanned data on the user's computer.
 - Exports and restores a portable local JSON backup containing film, social, history and management-list data without exposing the TMDB token.
+- Keeps a name-level follower history (who started following or unfollowed, between which two scans), with filtering and CSV export.
+- Optionally writes that backup automatically to a personal cloud sync folder (Google Drive, OneDrive, iCloud Drive or Dropbox desktop apps) and restores it on another computer.
 
 ## Install on Windows
 
@@ -79,6 +81,9 @@ npx playwright install chromium --only-shell
 npm run test:browser
 ```
 
+If Playwright's own browser is unavailable, set `TASTETWIN_CHROMIUM_PATH` to a
+Chromium executable for `test:browser` and `test:storage`.
+
 `npm test` checks imports, scoring, recommendations, social export, API access
 rules, Vite forwarding and bridge persistence. `test:browser` builds the app
 and desktop server, then checks import/reload, backups, social pagination,
@@ -104,6 +109,31 @@ npm run make
 ```
 
 The installer is written to `out/make/squirrel.windows/x64/TasteTwin-Setup.exe`.
+
+## Personal cloud backup
+
+TasteTwin does not run its own cloud. Under **Backup and transfer**, choose the
+folder that a desktop sync app already uploads (for example `G:\My Drive` for
+Google Drive or `%USERPROFILE%\OneDrive`). Detected sync folders appear as
+shortcuts. TasteTwin writes `TasteTwin/tastetwin-latest.json` plus one dated
+copy per day (the last 14 are kept); the sync app uploads them. No cloud
+password or token passes through TasteTwin.
+
+Automatic backups run a minute after changes settle, but only after this
+computer has synced with the folder once (**Back up now** or **Restore from
+cloud**). A fresh install therefore never overwrites another computer's backup
+with empty data. Only the TasteTwin window can call the backup endpoints;
+installed browser extensions are refused.
+
+## Follower history
+
+Each complete social scan is compared with the previous complete scan. Every
+follow and unfollow is recorded by name with the scan that detected it and the
+previous scan, so the real moment is known to lie between those two times.
+Partial scans never become the comparison baseline, and repeated delivery of the
+same scan while the network stage runs no longer clears the new/lost lists.
+The history is stored with the social data, included in backups and exported
+from **Follower history → CSV**.
 
 ## Data limits
 

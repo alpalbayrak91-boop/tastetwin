@@ -8,6 +8,7 @@ import { buildFilmInsights, isWatched } from "../src/lib/film-insights";
 import type { FilmSignal, UserTaste } from "../src/types";
 import { buildWatchTogetherPicks, filterWatchTogetherPicks, togetherPickReason } from "../src/lib/watch-together";
 import { socialDirectoryCsv } from "../src/lib/social-export";
+import { computeFollowerChanges, followerEventsCsv, type FollowerScan } from "../src/lib/follower-history";
 import { buildSocialDirectory, filterAndSortSocialDirectory, paginateSocialDirectory, type SocialDirectoryFilters } from "../src/lib/social-directory";
 
 function film(key: string, overrides: Partial<FilmSignal> = {}): FilmSignal {
@@ -161,4 +162,60 @@ test("social CSV exports all supplied rows, preserves Unicode and quotes spreads
   assert.match(csv, /"'=HYPERLINK/);
   assert.equal(csv.trim().split("\r\n").length, 3);
   assert.match(csv, /"Evet","Hayir","","","","",""/);
+});
+
+function followerScan(checkedAt: string, names: string[], overrides: Partial<FollowerScan> = {}): FollowerScan {
+  const followers = names.map((username) => ({ username, displayName: username.toUpperCase() }));
+  return { checkedAt, complete: true, scanStage: "social-complete", followers, counts: { following: 10, followers: followers.length, mutuals: 3 }, ...overrides };
+}
+
+test("follower history records who followed and unfollowed between complete scans", () => {
+  const first = computeFollowerChanges(followerScan("2026-10-01T10:00:00Z", ["ada", "bora"]), undefined, []);
+  assert.equal(first.changes.followerEvents.length, 0, "the first scan is only a baseline");
+  const second = computeFollowerChanges(followerScan("2026-10-05T10:00:00Z", ["bora", "cem"]), first.snapshot, first.changes.followerEvents);
+  assert.deepEqual(second.changes.newFollowers.map((m) => m.username), ["cem"]);
+  assert.deepEqual(second.changes.lostFollowers.map((m) => m.username), ["ada"]);
+  assert.deepEqual(second.changes.followerEvents.map((e) => [e.username, e.kind, e.since]), [
+    ["cem", "followed", "2026-10-01T10:00:00Z"],
+    ["ada", "unfollowed", "2026-10-01T10:00:00Z"],
+  ]);
+  const third = computeFollowerChanges(followerScan("2026-10-09T10:00:00Z", ["bora", "cem", "ada"]), second.snapshot, second.changes.followerEvents);
+  assert.equal(third.changes.followerEvents.length, 3, "a returning follower is a new event, earlier ones are kept");
+  assert.equal(third.changes.history.length, 3);
+});
+
+test("re-polling the same scan keeps new and lost followers instead of wiping them", () => {
+  const first = computeFollowerChanges(followerScan("2026-10-01T10:00:00Z", ["ada", "bora"]), undefined, []);
+  const scan = followerScan("2026-10-05T10:00:00Z", ["bora", "cem"]);
+  const second = computeFollowerChanges(scan, first.snapshot, []);
+  const repeated = computeFollowerChanges(scan, second.snapshot, second.changes.followerEvents);
+  assert.equal(repeated.snapshot, undefined, "the stored snapshot is left alone");
+  assert.deepEqual(repeated.changes.lostFollowers.map((m) => m.username), ["ada"]);
+  assert.deepEqual(repeated.changes.newFollowers.map((m) => m.username), ["cem"]);
+  assert.equal(repeated.changes.history.length, 2);
+  assert.equal(repeated.changes.followerEvents.length, 2);
+  assert.equal(repeated.changes.previousCheckedAt, "2026-10-01T10:00:00Z");
+
+  const network = computeFollowerChanges({ ...scan, checkedAt: "2026-10-05T12:00:00Z", scanStage: "network-complete", network: { candidateCount: 40 } }, second.snapshot, second.changes.followerEvents);
+  assert.deepEqual(network.changes.lostFollowers.map((m) => m.username), ["ada"]);
+  assert.equal(network.changes.history.length, 2);
+  assert.equal(network.changes.history[1].networkCandidates, 40);
+  assert.equal(second.snapshot!.history![1].networkCandidates, undefined, "the earlier snapshot is not mutated");
+});
+
+test("partial scans never become the comparison baseline", () => {
+  const first = computeFollowerChanges(followerScan("2026-10-01T10:00:00Z", ["ada", "bora"]), undefined, []);
+  const partial = computeFollowerChanges(followerScan("2026-10-02T10:00:00Z", ["ada"], { complete: false }), first.snapshot, []);
+  assert.equal(partial.snapshot, undefined);
+  assert.equal(partial.changes.lostFollowers.length, 0);
+});
+
+test("follower history CSV is newest first and neutralizes spreadsheet formulas", () => {
+  const first = computeFollowerChanges(followerScan("2026-10-01T10:00:00Z", ["ada"]), undefined, []);
+  const second = computeFollowerChanges(followerScan("2026-10-05T10:00:00Z", ["=cmd"]), first.snapshot, []);
+  const csv = followerEventsCsv(second.changes.followerEvents, "tr");
+  const lines = csv.trim().split("\r\n");
+  assert.equal(lines.length, 3);
+  assert.match(lines[1], /Takipten cikti/);
+  assert.match(lines[2], /^"'=cmd"/);
 });

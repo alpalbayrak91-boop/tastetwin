@@ -1,7 +1,8 @@
 import { createServer } from "node:http";
-import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
+import { mkdir, readdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import path from "node:path";
+import os from "node:os";
 import { fileURLToPath } from "node:url";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
@@ -21,6 +22,11 @@ const bridgeCacheFile = path.join(dataDir, "bridge-cache.json");
 const tmdbCacheFile = path.join(dataDir, "tmdb-cache.json");
 const scanStateFile = path.join(dataDir, "scan-state.json");
 const preparedExtensionDir = path.join(dataDir, "chrome-extension");
+const settingsFile = path.join(dataDir, "settings.json");
+const CLOUD_BACKUP_SUBDIR = "TasteTwin";
+const CLOUD_BACKUP_LATEST = "tastetwin-latest.json";
+const CLOUD_BACKUP_KEEP = 14;
+const CLOUD_BACKUP_MAX_BYTES = 250 * 1024 * 1024;
 const port = Number(process.env.PORT ?? 5173);
 const parser = new XMLParser({
   ignoreAttributes: false,
@@ -285,6 +291,65 @@ const server = createServer(async (req, res) => {
       }
       sendJson(res, 200, { ok: true, path: preparedExtensionDir });
       return;
+    }
+
+    if (url.pathname.startsWith("/api/system/cloud-backup")) {
+      // Backups hold the whole archive: only the TasteTwin window may touch them,
+      // never an installed extension.
+      if (req.headers["x-tastetwin-request"] !== "app" || String(req.headers.origin ?? "").startsWith("chrome-extension://")) {
+        sendJson(res, 403, { error: "app_request_required" });
+        return;
+      }
+      if (url.pathname === "/api/system/cloud-backup" && req.method === "GET") {
+        sendJson(res, 200, await cloudBackupStatus());
+        return;
+      }
+      if (url.pathname === "/api/system/cloud-backup/config" && req.method === "POST") {
+        const body = await readJsonBody(req);
+        const folder = typeof body.folder === "string" ? body.folder.trim() : "";
+        if (folder) {
+          if (!path.isAbsolute(folder)) {
+            sendJson(res, 400, { error: "folder_not_absolute" });
+            return;
+          }
+          const info = await stat(folder).catch(() => undefined);
+          if (!info?.isDirectory()) {
+            sendJson(res, 400, { error: "folder_not_found" });
+            return;
+          }
+        }
+        await saveSettings({ ...(await loadSettings()), cloudBackupFolder: folder ? path.resolve(folder) : undefined });
+        sendJson(res, 200, await cloudBackupStatus());
+        return;
+      }
+      if (url.pathname === "/api/system/cloud-backup" && req.method === "POST") {
+        const folder = (await loadSettings()).cloudBackupFolder;
+        if (!folder) {
+          sendJson(res, 409, { error: "folder_not_configured" });
+          return;
+        }
+        const body = await readJsonBody(req, CLOUD_BACKUP_MAX_BYTES);
+        if (body.format !== "tastetwin-backup" || !body.state || typeof body.state !== "object") {
+          sendJson(res, 400, { error: "invalid_backup" });
+          return;
+        }
+        sendJson(res, 200, await writeCloudBackup(folder, body));
+        return;
+      }
+      if (url.pathname === "/api/system/cloud-backup/latest" && req.method === "GET") {
+        const folder = (await loadSettings()).cloudBackupFolder;
+        if (!folder) {
+          sendJson(res, 409, { error: "folder_not_configured" });
+          return;
+        }
+        const content = await readFile(path.join(folder, CLOUD_BACKUP_SUBDIR, CLOUD_BACKUP_LATEST)).catch(() => undefined);
+        if (!content) {
+          sendJson(res, 404, { error: "backup_not_found" });
+          return;
+        }
+        sendText(res, 200, content, "application/json; charset=utf-8");
+        return;
+      }
     }
 
     if (url.pathname === "/api/tmdb/validate" && req.method === "POST") {
@@ -1250,7 +1315,82 @@ function sendText(res, status, body, contentType) {
   res.end(body);
 }
 
-function readJsonBody(req) {
+async function loadSettings() {
+  try {
+    const saved = JSON.parse(await readFile(settingsFile, "utf8"));
+    return saved && typeof saved === "object" && !Array.isArray(saved) ? saved : {};
+  } catch {
+    return {};
+  }
+}
+
+async function saveSettings(settings) {
+  await mkdir(dataDir, { recursive: true });
+  const temporaryFile = `${settingsFile}.tmp`;
+  await writeFile(temporaryFile, JSON.stringify(settings, null, 2), "utf8");
+  await rename(temporaryFile, settingsFile);
+}
+
+// Folders that desktop sync clients (Google Drive, OneDrive, iCloud, Dropbox)
+// upload automatically. TasteTwin only writes files there; the sync client
+// does the uploading, so no cloud account or token passes through the app.
+function cloudFolderCandidates() {
+  const home = os.homedir();
+  const candidates = [
+    ["Google Drive", path.join(home, "My Drive")],
+    ["Google Drive", path.join(home, "Google Drive")],
+    ["Google Drive", path.join(home, "Google Drive", "My Drive")],
+    ["Google Drive", "G:\\My Drive"],
+    ["Google Drive", "G:\\Drive'ım"],
+    ["OneDrive", process.env.OneDriveConsumer],
+    ["OneDrive", process.env.OneDrive],
+    ["OneDrive", path.join(home, "OneDrive")],
+    ["iCloud Drive", path.join(home, "iCloudDrive")],
+    ["iCloud Drive", path.join(home, "Library", "Mobile Documents", "com~apple~CloudDocs")],
+    ["Dropbox", path.join(home, "Dropbox")],
+  ];
+  const seen = new Set();
+  return candidates
+    .filter(([, folder]) => typeof folder === "string" && folder && existsSync(folder))
+    .map(([provider, folder]) => ({ provider, folder: path.resolve(folder) }))
+    .filter(({ folder }) => !seen.has(folder.toLowerCase()) && seen.add(folder.toLowerCase()));
+}
+
+async function cloudBackupStatus() {
+  const folder = (await loadSettings()).cloudBackupFolder;
+  let latest;
+  if (folder) {
+    const info = await stat(path.join(folder, CLOUD_BACKUP_SUBDIR, CLOUD_BACKUP_LATEST)).catch(() => undefined);
+    if (info) latest = { savedAt: info.mtime.toISOString(), bytes: info.size };
+  }
+  return {
+    folder,
+    folderAvailable: folder ? existsSync(folder) : false,
+    backupDirectory: folder ? path.join(folder, CLOUD_BACKUP_SUBDIR) : undefined,
+    latest,
+    candidates: cloudFolderCandidates(),
+  };
+}
+
+async function writeCloudBackup(folder, backup) {
+  const directory = path.join(folder, CLOUD_BACKUP_SUBDIR);
+  await mkdir(directory, { recursive: true });
+  const serialized = JSON.stringify(backup);
+  const latestFile = path.join(directory, CLOUD_BACKUP_LATEST);
+  // Write beside the target and rename so a sync client never uploads half a file.
+  const temporaryFile = path.join(directory, `.${CLOUD_BACKUP_LATEST}.tmp`);
+  await writeFile(temporaryFile, serialized, "utf8");
+  await rename(temporaryFile, latestFile);
+  const dailyFile = path.join(directory, `tastetwin-${new Date().toISOString().slice(0, 10)}.json`);
+  await writeFile(dailyFile, serialized, "utf8");
+  const dailyFiles = (await readdir(directory)).filter((name) => /^tastetwin-\d{4}-\d{2}-\d{2}\.json$/.test(name)).sort();
+  for (const name of dailyFiles.slice(0, Math.max(0, dailyFiles.length - CLOUD_BACKUP_KEEP))) {
+    await rm(path.join(directory, name), { force: true });
+  }
+  return { ok: true, savedAt: new Date().toISOString(), bytes: Buffer.byteLength(serialized), directory };
+}
+
+function readJsonBody(req, maxBytes = 4 * 1024 * 1024) {
   return new Promise((resolve, reject) => {
     let body = "";
     let bytes = 0;
@@ -1259,7 +1399,7 @@ function readJsonBody(req) {
     req.on("data", (chunk) => {
       if (failed) return;
       bytes += Buffer.byteLength(chunk);
-      if (bytes > 4 * 1024 * 1024) {
+      if (bytes > maxBytes) {
         failed = true;
         body = "";
         reject(Object.assign(new Error("Bridge payload too large"), { statusCode: 413 }));

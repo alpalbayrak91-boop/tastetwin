@@ -60,6 +60,29 @@ Letterboxd yorum trafiğinden **konuşma geçmişi** ve **sosyal yakınlık** ç
 
 ---
 
+## Claude (bulut oturumu) — 09.10.2026 durum ve yerel ajanlara notlar
+
+Bu oturum bulutta çalıştı: Alp'in bilgisayarına, kurulu uygulamaya, Letterboxd'a ve TMDB'ye erişimi yoktu (ağ politikası `letterboxd.com` ve `api.themoviedb.org`'u engelledi). Aşağıdakiler bu yüzden **yerelde doğrulanmalı**.
+
+**GitHub durumu (09.10):** `main` ve `claude/confident-galileo-fcesl0` aynı commit'teydi (`6a2e684`, 0.5.0). GitHub'da push edilmemiş fark yoktu. Alp'in makinesindeki çalışma klasöründe commit'lenmemiş değişiklik olup olmadığını buradan göremiyorum.
+
+**Bu oturumda eklenenler (PR'da):**
+- Takipçi geçmişi: kim ne zaman takip etti / bıraktı, isim bazında, filtre ve CSV. `src/lib/follower-history.ts`, kişi geçmişi sosyal veride (`followerEvents`) tutuluyor, yedeğe giriyor.
+- Hata düzeltmesi: ağ taraması sürerken uygulama aynı sosyal sonucu 3,5 sn'de bir yeniden işliyordu; ikinci işlemde "yeni takipçi / takipten çıkan" listeleri sıfırlanıyor, sayım geçmişi kopyalarla doluyordu. Artık aynı tarama tekrar gelince hiçbir şey değişmiyor (`computeFollowerChanges`, testli).
+- Yedek artık takipçi karşılaştırma başlangıcını (`followerBaselines`) da içeriyor. localStorage boşsa (yeni bilgisayar, geri yükleme) son tam tarama başlangıç sayılıyor.
+- Kişisel bulut yedeği: Google Drive / OneDrive / iCloud / Dropbox senkron klasörüne `TasteTwin/tastetwin-latest.json` + 14 günlük kopya. Yeni kurulum, klasörle bir kez eşleşmeden otomatik yazmaz.
+
+**Yerel ajandan (Codex / Claude Desktop) istenenler — sonucu bu dosyaya yaz:**
+- [ ] `git status` ve `git log origin/main..HEAD`: Alp'in makinesinde push edilmemiş veya commit'lenmemiş iş var mı? Varsa önce o commit'lensin, sonra bu PR ile birleştirilsin.
+- [ ] `npm ci && npm test && npm run test:browser` Windows'ta geçiyor mu?
+- [ ] Google Drive for desktop kuruluysa: aday listesinde `G:\My Drive` (Türkçe Windows'ta `G:\Drive'ım`) görünüyor mu? Görünmüyorsa gerçek yolu yaz, `cloudFolderCandidates()`'a eklensin.
+- [ ] Bulut yedeği: klasör seç → dosya Drive'da görünüyor mu? İkinci bilgisayarda (ya da temizlenmiş profil) "Buluttan geri yükle" çalışıyor mu? 50 MB+ arşivde süre nasıl?
+- [ ] Gerçek hesapla iki tam tarama arasında takipçi geçmişi doğru isimleri gösteriyor mu? Ağ aşaması sürerken "Yeni takipçi" sayısı artık sıfırlanmamalı.
+- [ ] `npm run make` ile yeni kurulum paketi; kurulu uygulamada (`%APPDATA%\TasteTwin`) eski veri sorunsuz açılıyor mu?
+- [ ] Eski açık madde: eklenti hâlâ `127.0.0.1:5173`'e sabit. 5173 doluyken popup uyarısı eklendi mi?
+
+**İnternette çalışma hakkında karar Alp'te:** Şu anki mimari yerel (Electron + yerel Node sunucusu + eklenti köprüsü `127.0.0.1`). Web'e taşımak; giriş/hesap sistemi, sunucuda kişi başı depolama ve Letterboxd isteklerinin veri merkezi IP'lerinden atılmasını gerektirir (engellenme ve kullanım koşulları riski). Önerim: yerel kalsın, çoklu cihaz için bulut klasörü yedeği kullanılsın. İleride istenirse sadece yedeği tarayıcıda açıp gösteren, sunucusuz bir "salt okunur web görüntüleyici" düşünülebilir.
+
 ## Claude → Codex soruları
 
 - [ ] `data/` altındaki kalıcı dosyaların şeması belgelenmiş mi? Konuşma verisi için ayrı dosya mı, mevcut store'a alan mı eklemeyi tercih edersin?
