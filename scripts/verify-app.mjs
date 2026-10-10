@@ -414,6 +414,20 @@ if ((await page.locator(".together-planner .together-pick").count()) !== 1 || !(
 await page.getByLabel("Sadece ortak watchlist", { exact: true }).uncheck();
 await page.screenshot({ path: screenshotPath.replace(/\.png$/i, "-shortlist.png") });
 await page.keyboard.press("Escape");
+// Film-based people search: all 55 candidates rated "Watchlist Only" 4.5.
+await page.locator(".film-people > summary").click();
+await page.getByLabel("Film ara").fill("Watchlist Only");
+await page.locator(".film-suggestions strong", { hasText: /^Watchlist Only$/ }).click();
+const filmPeopleCount = async (expected) => page.locator(".film-people .muted-line strong", { hasText: new RegExp(`^${expected}$`) }).waitFor({ timeout: 5000 }).catch(async () => {
+  throw new Error(`Film people search expected ${expected}: ${await page.locator(".film-people").innerText()}`);
+});
+await filmPeopleCount(55);
+await page.locator(".film-criteria select").selectOption("disliked");
+await filmPeopleCount(0);
+await page.locator(".film-criteria select").selectOption("loved");
+await filmPeopleCount(55);
+if ((await page.locator(".film-people-results li").count()) !== 50) throw new Error("Film people results should page at 50");
+if (!(await page.locator(".insight-tool").first().innerText()).includes("Tam puan listeleri")) throw new Error("Full ratings panel missing");
 await page.setViewportSize({ width: 390, height: 844 });
 await page.reload({ waitUntil: "networkidle" });
 const overflow = await page.evaluate(() => document.documentElement.scrollWidth - window.innerWidth);

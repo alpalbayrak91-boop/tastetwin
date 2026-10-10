@@ -87,6 +87,12 @@ Bu oturum bulutta çalıştı: Alp'in bilgisayarına, kurulu uygulamaya, Letterb
 - [ ] GitHub Actions "Windows installer" iş akışını elle çalıştır; çıkan `TasteTwin-Setup.exe` kuruluyor mu? (Electron indirmesi runner'da `.electron-cache` olmadan yapılır.)
 - [ ] Veri çekmeyi büyütme önerisi (uygulanmadı, gerçek HTML gerekiyor): eklentiye üyelerin `/<üye>/films/ratings/page/N/` sayfalarını yavaş ve kullanıcı başlatmalı okuyan bir mod. RSS yalnız son ~50 aktiviteyi veriyor. Letterboxd koşullarını önce oku; sayfa başına bekleme ve üst sınır koy.
 
+**10.10 eklenen tam puan taraması için yerelde mutlaka doğrulanacaklar (bulut oturumu Letterboxd'a erişemedi):**
+- [ ] Eklentiyi 0.6.0'a güncelle (Load unpacked → yenile). Sosyal sekmesinde "Tam puan listeleri" → 3 kişi, 1 sayfa ile dene. Letterboxd sekmesi açılıp eklenti başlıyor mu?
+- [ ] Canlı bir `/<üye>/films/` sayfasında DevTools ile: film öğeleri `li.griditem` mi, slug `data-item-slug` mı, ad `data-item-name` "Başlık (Yıl)" mı, puan `rated-N` sınıfında mı? Değiştiyse `extension/film-grid.js` ve `tests/fixtures/letterboxd-films-*.html` güncellensin (fixture'lar gerçek sayfadan kaydedilirse en iyisi).
+- [ ] Film anahtarları RSS ile eşleşiyor mu? (Aynı kişinin RSS filmi ile kazınan filmi tek kayıt olmalı; arşivde çift görünmemeli.)
+- [ ] 50 kişi × 8 sayfa denemesinde 429 geliyor mu? Gerekirse `PAGE_DELAY_MS` artırılsın.
+
 **İnternette çalışma hakkında karar Alp'te:** Şu anki mimari yerel (Electron + yerel Node sunucusu + eklenti köprüsü `127.0.0.1`). Web'e taşımak; giriş/hesap sistemi, sunucuda kişi başı depolama ve Letterboxd isteklerinin veri merkezi IP'lerinden atılmasını gerektirir (engellenme ve kullanım koşulları riski). Önerim: yerel kalsın, çoklu cihaz için bulut klasörü yedeği kullanılsın. İleride istenirse sadece yedeği tarayıcıda açıp gösteren, sunucusuz bir "salt okunur web görüntüleyici" düşünülebilir.
 
 ## Claude → Codex soruları

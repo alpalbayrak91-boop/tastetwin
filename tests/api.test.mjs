@@ -119,3 +119,40 @@ test("cloud backup folder receives app backups and serves the latest one back", 
     await rm(folder, { recursive: true, force: true });
   }
 });
+
+test("ratings scan requests reach the extension and scraped films come back as film records", async () => {
+  const app = { "Content-Type": "application/json", "X-TasteTwin-Request": "app" };
+  const extension = { "Content-Type": "application/json", Origin: `chrome-extension://${"b".repeat(32)}` };
+  assert.equal((await fetch(server.url + "/api/extension/request-ratings", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ handle: "owner", handles: ["ece"] }) })).status, 403);
+  assert.equal((await fetch(server.url + "/api/extension/request-ratings", { method: "POST", headers: app, body: JSON.stringify({ handle: "owner", handles: [] }) })).status, 400);
+  const requested = await fetch(server.url + "/api/extension/request-ratings", { method: "POST", headers: app, body: JSON.stringify({ handle: "owner", handles: ["Ece", "@ece", "bad handle!", "deniz"], maxPages: 99 }) });
+  assert.equal(requested.status, 200);
+  assert.equal((await requested.json()).members, 2);
+  const claimed = await (await fetch(server.url + "/api/extension/claim-scan", { method: "POST", headers: extension, body: JSON.stringify({ handle: "owner" }) })).json();
+  assert.equal(claimed.mode, "ratings");
+  assert.deepEqual(claimed.handles, ["ece", "deniz"]);
+  assert.equal(claimed.maxPages, 40);
+
+  await fetch(server.url + "/api/extension/progress", { method: "POST", headers: extension, body: JSON.stringify({ handle: "owner", state: "complete", mode: "ratings", text: "done" }) });
+  const progress = await (await fetch(server.url + "/api/extension/progress?handle=owner")).json();
+  assert.equal(progress.progress.mode, "ratings", "the app needs the ratings mode to see the scan finish");
+
+  const films = [
+    { slug: "parasite-2019", title: "Parasite", year: 2019, rating: 4.5, liked: true },
+    { slug: "bad", title: "Bad rating", rating: 4.3 },
+    { slug: "Not A Slug", title: "x", rating: 3 },
+    { slug: "parasite-2019", title: "Parasite", year: 2019, rating: 4 },
+  ];
+  const saved = await fetch(server.url + "/api/extension/film-ratings", { method: "POST", headers: extension, body: JSON.stringify({ handle: "ece", films, complete: true, pages: 1, scannedAt: "2026-10-10T10:00:00.000Z" }) });
+  assert.equal(saved.status, 200);
+  const { members } = await (await fetch(server.url + "/api/letterboxd/film-ratings?handles=ece")).json();
+  assert.equal(members.length, 1);
+  assert.equal(members[0].complete, true);
+  assert.deepEqual(members[0].films.map((f) => [f.key, f.rating, f.slug]), [["film-parasite-2019", 4, "parasite-2019"], ["film-bad-rating-unknown", undefined, "bad"]]);
+  const none = await (await fetch(server.url + "/api/letterboxd/film-ratings?since=2030-01-01T00:00:00Z")).json();
+  assert.equal(none.members.length, 0);
+  await new Promise((resolve) => setTimeout(resolve, 2000));
+  await server.start();
+  const restored = await (await fetch(server.url + "/api/letterboxd/film-ratings")).json();
+  assert.equal(restored.members.find((member) => member.handle === "ece")?.films.length, 2, "scraped ratings survive a restart");
+});

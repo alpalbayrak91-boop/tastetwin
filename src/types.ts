@@ -26,6 +26,8 @@ export type FilmSignal = {
   keywords?: string[];
   tmdbRecommendations?: string[];
   activityDate?: string;
+  /** Letterboxd film slug, known for films read from member film pages. */
+  slug?: string;
 };
 
 export type UserTaste = {
@@ -49,6 +51,10 @@ export type UserTaste = {
   activityScore?: number;
   importedAt: string;
   rssUpdatedAt?: string;
+  /** When the extension last read this member's public film pages. */
+  ratingsScannedAt?: string;
+  /** Whether that read reached the last page. */
+  ratingsComplete?: boolean;
   source: "rss" | "upload";
   films: FilmSignal[];
 };

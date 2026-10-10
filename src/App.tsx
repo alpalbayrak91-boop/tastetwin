@@ -35,6 +35,17 @@ import { version as appVersion } from "../package.json";
 import { version as extensionVersion } from "../extension/manifest.json";
 import { WatchTogetherPanel } from "./components/WatchTogetherPanel";
 import { socialDirectoryCsv } from "./lib/social-export";
+import { pickRatingsTargets, scrapedMembersToUsers, type RatingsScope, type ScrapedMember } from "./lib/full-ratings";
+import {
+  buildFilmCatalog,
+  defaultFilmPeopleOptions,
+  filmPeopleCsv,
+  findPeopleByFilms,
+  searchFilmCatalog,
+  type FilmCondition,
+  type FilmCriterion,
+  type FilmPeopleOptions,
+} from "./lib/film-people";
 import { computeFollowerChanges, followerEventsCsv, summarizeFollowerEvents, type FollowerEvent, type FollowerSnapshot } from "./lib/follower-history";
 import { togetherPickReason } from "./lib/watch-together";
 import {
@@ -158,7 +169,7 @@ type TasteTwinBackup = {
 };
 
 type FullRefreshStep = {
-  id: "own" | "scan" | "activity" | "tmdb" | "backup";
+  id: "own" | "scan" | "activity" | "ratings" | "tmdb" | "backup";
   state: "pending" | "running" | "done" | "failed" | "skipped";
 };
 
@@ -172,6 +183,8 @@ type CloudBackupStatus = {
 
 const FOLLOWER_BASELINE_PREFIX = "tastetwin.followers.";
 const CLOUD_BACKUP_DELAY_MS = 60 * 1000;
+const FULL_REFRESH_RATINGS_MEMBERS = 40;
+const FULL_REFRESH_RATINGS_PAGES = 6;
 const appRequestHeaders = { "Content-Type": "application/json", "X-TasteTwin-Request": "app" };
 
 const PERSISTENT_STATE_KEY = "app";
@@ -233,8 +246,13 @@ export default function App() {
   const [cloudLinked, setCloudLinked] = useState(() => localStorage.getItem("tastetwin.cloudLinked") ?? "");
   const [fullRefresh, setFullRefresh] = useState<{ running: boolean; steps: FullRefreshStep[]; startedAt: number }>();
   const [fullRefreshBackupRequest, setFullRefreshBackupRequest] = useState(0);
+  const [ratingsScan, setRatingsScan] = useState<{ running: boolean; text: string; members: number; loaded: number }>();
   const socialByHandleRef = useRef(socialByHandle);
   socialByHandleRef.current = socialByHandle;
+  const usersRef = useRef(users);
+  usersRef.current = users;
+  const matchesRef = useRef(matches);
+  matchesRef.current = matches;
   const [copied, setCopied] = useState(false);
   const [preparedExtensionPath, setPreparedExtensionPath] = useState("");
   const [tmdbToken, setTmdbToken] = useState(() => localStorage.getItem("tastetwin.tmdbToken") ?? "");
@@ -895,6 +913,90 @@ export default function App() {
     }
   }
 
+  /** Merge member film pages the extension saved into the local archive. */
+  async function loadScrapedRatings(since?: string) {
+    try {
+      const query = since ? `?since=${encodeURIComponent(since)}` : "";
+      const response = await fetch(`/api/letterboxd/film-ratings${query}`);
+      if (!response.ok) return 0;
+      const payload = (await response.json()) as { members?: ScrapedMember[] };
+      const incoming = scrapedMembersToUsers(payload.members ?? [], usersRef.current, accountHandle || activeUser?.handle || "");
+      if (incoming.length) setUsers((current) => mergeRssUsers(current, incoming));
+      return incoming.length;
+    } catch {
+      return 0;
+    }
+  }
+
+  function ratingsTargetsFor(scope: RatingsScope, limit: number) {
+    const handle = (accountHandle || activeUser?.handle || "").toLowerCase();
+    const social = socialByHandleRef.current[handle];
+    const members = social?.available
+      ? scope === "following" ? social.following
+        : scope === "mutuals" ? social.mutuals
+          : scope === "followers" ? social.followers
+            : scope === "directory" ? [...social.following, ...social.followers, ...(social.networkCandidates ?? [])]
+              : []
+      : [];
+    const candidates = scope === "matches"
+      ? [...matchesRef.current].sort((a, b) => b.recommendationScore - a.recommendationScore)
+        .map((match, index, list) => ({ handle: match.user.handle, rank: list.length - index }))
+      : members.map((member, index) => ({ handle: member.username, rank: members.length - index }));
+    return pickRatingsTargets(candidates.filter((candidate) => candidate.handle.toLowerCase() !== handle), usersRef.current, limit);
+  }
+
+  // Opens your Letterboxd profile; the extension claims the request there and
+  // reads each member's film pages. Finished members are merged as they arrive.
+  async function requestRatingsScan(handles: string[], maxPages: number): Promise<boolean> {
+    const owner = (accountHandle || activeUser?.handle || "").trim().replace(/^@/, "").toLowerCase();
+    if (!/^[a-z0-9_-]{2,32}$/.test(owner) || !handles.length) return false;
+    const tr = language === "tr";
+    setRatingsScan({ running: true, text: tr ? "Letterboxd aciliyor; eklenti puan sayfalarini okuyacak." : "Opening Letterboxd; the extension will read rating pages.", members: handles.length, loaded: 0 });
+    try {
+      const response = await fetch("/api/extension/request-ratings", {
+        method: "POST",
+        headers: appRequestHeaders,
+        body: JSON.stringify({ handle: owner, handles, maxPages }),
+      });
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(payload.error ?? "ratings_request_failed");
+      window.open(`https://letterboxd.com/${encodeURIComponent(owner)}/`, "_blank", "noopener,noreferrer");
+      const requestedAt = payload.requestedAt as string;
+      const startupDeadline = Date.now() + 3 * 60 * 1000;
+      let sawLive = false;
+      let loaded = 0;
+      while (true) {
+        await new Promise((resolve) => window.setTimeout(resolve, 5000));
+        loaded += await loadScrapedRatings(requestedAt);
+        const progress = await readScanProgress(owner);
+        const current = progress?.mode === "ratings" && Date.parse(progress.updatedAt ?? "") >= Date.parse(requestedAt) ? progress : undefined;
+        if (current?.live) sawLive = true;
+        setRatingsScan({ running: true, text: current?.text ?? (tr ? "Eklentinin baslamasi bekleniyor..." : "Waiting for the extension..."), members: handles.length, loaded });
+        if (current?.state === "complete") {
+          loaded += await loadScrapedRatings(requestedAt);
+          setRatingsScan({ running: false, text: current.text ?? "", members: handles.length, loaded });
+          return true;
+        }
+        if (current && ["error", "cancelled", "interrupted"].includes(current.state) || (sawLive && current?.stalled)) {
+          setRatingsScan({ running: false, text: `${current?.text ?? ""} ${current?.hint ?? ""}`.trim(), members: handles.length, loaded });
+          return false;
+        }
+        if (!sawLive && Date.now() > startupDeadline) {
+          setRatingsScan({ running: false, text: tr ? "Eklenti baslamadi. Eklentiyi 0.6.0'a guncelle ve Letterboxd sekmesini yenile." : "The extension did not start. Update it to 0.6.0 and refresh the Letterboxd tab.", members: handles.length, loaded });
+          return false;
+        }
+      }
+    } catch (error) {
+      console.error(error);
+      setRatingsScan({ running: false, text: tr ? "Puan taramasi istenemedi." : "Could not request the ratings scan.", members: handles.length, loaded: 0 });
+      return false;
+    }
+  }
+
+  useEffect(() => {
+    if (storageReady) void loadScrapedRatings();
+  }, [storageReady]);
+
   // One button for everything TasteTwin can collect. Each step is independent:
   // a failed scan still lets the remaining steps refresh what is already known.
   async function runFullRefresh() {
@@ -903,6 +1005,7 @@ export default function App() {
       { id: "own", state: "pending" },
       { id: "scan", state: "pending" },
       { id: "activity", state: "pending" },
+      { id: "ratings", state: "pending" },
       { id: "tmdb", state: tmdbToken.trim() ? "pending" : "skipped" },
       { id: "backup", state: cloudBackup?.folder ? "pending" : "skipped" },
     ];
@@ -920,6 +1023,15 @@ export default function App() {
     update("activity", "running");
     await useNetworkAsMatchCandidates();
     update("activity", "done");
+    // Matches are recalculated after the activity step; give that a moment.
+    await new Promise((resolve) => window.setTimeout(resolve, 3000));
+    const ratingsTargets = ratingsTargetsFor("matches", FULL_REFRESH_RATINGS_MEMBERS);
+    if (ratingsTargets.length) {
+      update("ratings", "running");
+      update("ratings", (await requestRatingsScan(ratingsTargets, FULL_REFRESH_RATINGS_PAGES)) ? "done" : "failed");
+    } else {
+      update("ratings", "skipped");
+    }
     if (steps.find((step) => step.id === "tmdb")?.state === "pending") {
       update("tmdb", "running");
       await enrichWithTmdb();
@@ -1841,6 +1953,23 @@ export default function App() {
             )}
 
             {tab === "social" && (
+              <>
+              <FullRatingsPanel
+                language={language}
+                users={users}
+                scan={ratingsScan}
+                hasSocial={Boolean(socialByHandle[accountHandle || activeUser.handle]?.available)}
+                onStart={(scope, count, pages) => void requestRatingsScan(ratingsTargetsFor(scope, count), pages)}
+                previewCount={(scope, count) => ratingsTargetsFor(scope, count).length}
+              />
+              <FilmPeopleFinder
+                language={language}
+                users={users}
+                ownerHandle={accountHandle || activeUser.handle}
+                social={socialByHandle[accountHandle || activeUser.handle]}
+                matches={matches}
+                onSelectMatch={setSelectedMatch}
+              />
               <SocialPanel
                 language={language}
                 data={socialByHandle[accountHandle || activeUser.handle]}
@@ -1864,6 +1993,7 @@ export default function App() {
                   }))
                 }
               />
+              </>
             )}
 
             {tab === "profile" && (
@@ -4036,12 +4166,285 @@ function cleanSocialMembers(value: unknown): SocialMember[] | undefined {
   return [...members.values()];
 }
 
+function FullRatingsPanel({
+  language,
+  users,
+  scan,
+  hasSocial,
+  onStart,
+  previewCount,
+}: {
+  language: Language;
+  users: UserTaste[];
+  scan?: { running: boolean; text: string; members: number; loaded: number };
+  hasSocial: boolean;
+  onStart: (scope: RatingsScope, count: number, pages: number) => void;
+  previewCount: (scope: RatingsScope, count: number) => number;
+}) {
+  const tr = language === "tr";
+  const [scope, setScope] = useState<RatingsScope>("matches");
+  const [count, setCount] = useState(50);
+  const [pages, setPages] = useState(8);
+  const read = users.filter((user) => user.ratingsScannedAt);
+  const ratings = read.reduce((sum, user) => sum + user.films.filter((film) => film.rating !== undefined).length, 0);
+  const pending = previewCount(scope, count);
+  const minutes = Math.max(1, Math.round((pending * pages * 1.6) / 60));
+  return (
+    <details className="panel insight-tool" open={scan?.running || undefined}>
+      <summary>
+        <Film size={18} />
+        <strong>{tr ? "Tam puan listeleri (Letterboxd film sayfalari)" : "Full rating lists (Letterboxd film pages)"}</strong>
+        <small>{tr ? `${read.length} kisinin tam listesi, ${ratings} puan` : `${read.length} full lists, ${ratings} ratings`}</small>
+      </summary>
+      <p className="muted-line">
+        {tr
+          ? "RSS her uyenin yalniz son ~50 film etkinligini verir. Eklenti, giris yaptigin Letterboxd sekmesinde secilen kisilerin herkese acik film sayfalarini (72 film/sayfa) yavasca okur ve tum puanlarini eslesmeye katar. Sayfalar arasinda 1,4 sn beklenir; 429 gelirse geri cekilir. Letterboxd kosullari otomatik toplamayi sinirlar: az kisiyle ve olculu kullan."
+          : "RSS shows only each member's last ~50 film events. The extension slowly reads the selected members' public film pages (72 films per page) in your logged-in Letterboxd tab and adds every rating to matching. It waits 1.4 s between pages and backs off on 429. Letterboxd's terms limit automated collection: use it sparingly."}
+      </p>
+      <div className="insight-tool-row">
+        <label className="archive-field">
+          <span>{tr ? "Kimler" : "Who"}</span>
+          <select value={scope} onChange={(event) => setScope(event.target.value as RatingsScope)}>
+            <option value="matches">{tr ? "En iyi eslesmeler" : "Best matches"}</option>
+            <option value="mutuals" disabled={!hasSocial}>{tr ? "Karsilikli takiplesenler" : "Mutuals"}</option>
+            <option value="following" disabled={!hasSocial}>{tr ? "Takip ettiklerim" : "Following"}</option>
+            <option value="followers" disabled={!hasSocial}>{tr ? "Takipcilerim" : "Followers"}</option>
+            <option value="directory" disabled={!hasSocial}>{tr ? "Tum dizin (ag dahil)" : "Whole directory (incl. network)"}</option>
+          </select>
+        </label>
+        <label className="archive-field">
+          <span>{tr ? "En fazla kisi" : "Max people"}</span>
+          <input type="number" min={1} max={500} value={count} onChange={(event) => setCount(Math.min(500, Math.max(1, Number(event.target.value) || 1)))} />
+        </label>
+        <label className="archive-field">
+          <span>{tr ? "Kisi basina sayfa (72 film)" : "Pages per person (72 films)"}</span>
+          <input type="number" min={1} max={40} value={pages} onChange={(event) => setPages(Math.min(40, Math.max(1, Number(event.target.value) || 1)))} />
+        </label>
+        <button className="primary-button" disabled={scan?.running || !pending} onClick={() => onStart(scope, count, pages)}>
+          {scan?.running ? <Loader2 className="spin" size={16} /> : <Search size={16} />}
+          <span>{tr ? `${pending} kisinin puanlarini oku` : `Read ${pending} people's ratings`}</span>
+        </button>
+      </div>
+      <p className="muted-line">
+        {tr
+          ? `Tahmini en fazla ~${minutes} dk. Son 30 gunde okunanlar atlanir. Uygulama ve Letterboxd sekmesi acik kalmali; her biten kisi hemen kaydedilir.`
+          : `Estimated at most ~${minutes} min. Members read in the last 30 days are skipped. Keep the app and the Letterboxd tab open; each finished member is saved at once.`}
+      </p>
+      {scan && (
+        <p className={`ratings-scan-status${scan.running ? " running" : ""}`} aria-live="polite">
+          {scan.running && <Loader2 className="spin" size={14} />} {scan.text}
+          {" · "}
+          {tr ? `${scan.loaded}/${scan.members} kisi alindi` : `${scan.loaded}/${scan.members} people received`}
+        </p>
+      )}
+    </details>
+  );
+}
+
+const FILM_CONDITIONS: Array<[FilmCondition, string, string]> = [
+  ["loved", "Sevdi (4+ veya kalp)", "Loved (4+ or heart)"],
+  ["high", "Cok sevdi (4.5+)", "Adored (4.5+)"],
+  ["disliked", "Sevmedi (2.5 ve alti)", "Disliked (2.5 or less)"],
+  ["low", "Nefret etti (1.5 ve alti)", "Hated (1.5 or less)"],
+  ["liked-heart", "Kalp verdi", "Gave a heart"],
+  ["rated", "Puanladi", "Rated"],
+  ["watched", "Izledi", "Watched"],
+];
+
+function FilmPeopleFinder({
+  language,
+  users,
+  ownerHandle,
+  social,
+  matches,
+  onSelectMatch,
+}: {
+  language: Language;
+  users: UserTaste[];
+  ownerHandle: string;
+  social?: SocialData;
+  matches: MatchResult[];
+  onSelectMatch: (match: MatchResult) => void;
+}) {
+  const tr = language === "tr";
+  const locale = tr ? "tr-TR" : "en-US";
+  const [query, setQuery] = useState("");
+  const [criteria, setCriteria] = useState<FilmCriterion[]>([]);
+  const [options, setOptions] = useState<FilmPeopleOptions>(defaultFilmPeopleOptions);
+  const [visible, setVisible] = useState(50);
+  const catalog = useMemo(() => buildFilmCatalog(users), [users]);
+  const catalogByKey = useMemo(() => new Map(catalog.map((entry) => [entry.key, entry])), [catalog]);
+  const suggestions = useMemo(() => searchFilmCatalog(catalog, query, 12, locale).filter((entry) => !criteria.some((criterion) => criterion.key === entry.key)), [catalog, criteria, locale, query]);
+  const results = useMemo(
+    () => findPeopleByFilms(users, criteria, { ...options, excludeOwner: ownerHandle }),
+    [criteria, options, ownerHandle, users],
+  );
+  const matchByHandle = useMemo(() => new Map(matches.map((match) => [match.user.handle.toLowerCase(), match])), [matches]);
+  const following = useMemo(() => new Set(social?.available ? social.following.map((member) => member.username.toLowerCase()) : []), [social]);
+  const followers = useMemo(() => new Set(social?.available ? social.followers.map((member) => member.username.toLowerCase()) : []), [social]);
+  const owner = users.find((user) => user.handle.toLowerCase() === ownerHandle.toLowerCase());
+
+  useEffect(() => setVisible(50), [criteria, options]);
+
+  function addFilm(key: string) {
+    if (criteria.length >= 12) return;
+    setCriteria((current) => [...current, { key, condition: "loved" }]);
+    setQuery("");
+  }
+
+  function pickMyFilms(kind: "loved" | "disliked") {
+    if (!owner) return;
+    const films = owner.films
+      .filter((film) => (kind === "loved" ? (film.rating ?? 0) >= 4.5 : film.rating !== undefined && film.rating <= 2))
+      .sort((a, b) => (catalogByKey.get(b.key)?.raters ?? 0) - (catalogByKey.get(a.key)?.raters ?? 0))
+      .slice(0, 5);
+    setCriteria(films.map((film) => ({ key: film.key, condition: kind })));
+    setOptions((current) => ({ ...current, match: "any" }));
+  }
+
+  function downloadCsv() {
+    const url = URL.createObjectURL(new Blob([filmPeopleCsv(results, criteria, catalogByKey, language)], { type: "text/csv;charset=utf-8" }));
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = `tastetwin-filmden-kisiler-${new Date().toISOString().slice(0, 10)}.csv`;
+    link.click();
+    window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+  }
+
+  const filmLabel = (key: string) => {
+    const entry = catalogByKey.get(key);
+    return entry ? `${entry.title}${entry.year ? ` (${entry.year})` : ""}` : key;
+  };
+
+  return (
+    <details className="panel insight-tool film-people" open={criteria.length > 0 || undefined}>
+      <summary>
+        <Heart size={18} />
+        <strong>{tr ? "Filmden kisi bul" : "Find people by film"}</strong>
+        <small>{tr ? `${catalog.length} film, ${users.length} kisi icinde` : `across ${catalog.length} films and ${users.length} people`}</small>
+      </summary>
+      <p className="muted-line">
+        {tr
+          ? "Film sec, her biri icin kosul belirle (sevdi, sevmedi, izledi...). TasteTwin'e yuklenen herkes taranir; filmi hic kaydetmemis biri \"sevmedi\" sayilmaz. Tam puan listesi okunan kisilerde sonuc cok daha eksiksizdir."
+          : "Pick films and a condition for each (loved, disliked, watched...). Everyone loaded into TasteTwin is searched; someone who never logged a film is not counted as disliking it. Results are far more complete for members whose full ratings were read."}
+      </p>
+      <div className="insight-tool-row">
+        <label className="film-search film-picker">
+          <Search size={16} />
+          <input value={query} onChange={(event) => setQuery(event.target.value)} placeholder={tr ? "Film adi yaz..." : "Type a film title..."} aria-label={tr ? "Film ara" : "Search films"} />
+        </label>
+        <button className="browser-scan-button" onClick={() => pickMyFilms("loved")} disabled={!owner}>
+          {tr ? "En sevdigim 5 film" : "My 5 favourites"}
+        </button>
+        <button className="browser-scan-button" onClick={() => pickMyFilms("disliked")} disabled={!owner}>
+          {tr ? "En sevmedigim 5 film" : "My 5 least liked"}
+        </button>
+      </div>
+      {suggestions.length > 0 && (
+        <ul className="film-suggestions" role="listbox">
+          {suggestions.map((entry) => (
+            <li key={entry.key}>
+              <button onClick={() => addFilm(entry.key)}>
+                <strong>{entry.title}</strong> {entry.year && <span>{entry.year}</span>}
+                <small>{tr ? `${entry.raters} kisi` : `${entry.raters} people`}{entry.mean !== undefined ? ` · ${tr ? "ort." : "avg"} ${entry.mean.toFixed(1)}` : ""}</small>
+              </button>
+            </li>
+          ))}
+        </ul>
+      )}
+      {criteria.length > 0 && (
+        <>
+          <ul className="film-criteria">
+            {criteria.map((criterion, index) => (
+              <li key={criterion.key}>
+                <span>{filmLabel(criterion.key)}</span>
+                <select
+                  value={criterion.condition}
+                  aria-label={tr ? "Kosul" : "Condition"}
+                  onChange={(event) => setCriteria((current) => current.map((item, itemIndex) => (itemIndex === index ? { ...item, condition: event.target.value as FilmCondition } : item)))}
+                >
+                  {FILM_CONDITIONS.map(([value, trLabel, enLabel]) => <option key={value} value={value}>{tr ? trLabel : enLabel}</option>)}
+                </select>
+                <button onClick={() => setCriteria((current) => current.filter((_, itemIndex) => itemIndex !== index))} title={tr ? "Kaldir" : "Remove"}>
+                  <X size={14} />
+                </button>
+              </li>
+            ))}
+          </ul>
+          <div className="insight-tool-row">
+            <label className="archive-field">
+              <span>{tr ? "Eslesme" : "Match"}</span>
+              <select value={options.match} onChange={(event) => setOptions((current) => ({ ...current, match: event.target.value as FilmPeopleOptions["match"] }))}>
+                <option value="all">{tr ? "Tum kosullar" : "All conditions"}</option>
+                <option value="any">{tr ? "En az biri (cok uyan once)" : "Any (most matches first)"}</option>
+              </select>
+            </label>
+            <label className="archive-field">
+              <span>{tr ? "\"Sevdi\" esigi" : "\"Loved\" threshold"}</span>
+              <input type="number" min={0.5} max={5} step={0.5} value={options.lovedAt} onChange={(event) => setOptions((current) => ({ ...current, lovedAt: Number(event.target.value) || 4 }))} />
+            </label>
+            <label className="archive-field">
+              <span>{tr ? "\"Sevmedi\" esigi" : "\"Disliked\" threshold"}</span>
+              <input type="number" min={0.5} max={5} step={0.5} value={options.dislikedAt} onChange={(event) => setOptions((current) => ({ ...current, dislikedAt: Number(event.target.value) || 2.5 }))} />
+            </label>
+            <button className="browser-scan-button" onClick={downloadCsv} disabled={!results.length}>
+              <Download size={15} />
+              <span>CSV</span>
+            </button>
+            <button className="browser-scan-button" onClick={() => setCriteria([])}>
+              <X size={15} />
+              <span>{tr ? "Temizle" : "Clear"}</span>
+            </button>
+          </div>
+          <p className="muted-line"><strong>{results.length}</strong> {tr ? "kisi bulundu" : "people found"}</p>
+          <ol className="film-people-results">
+            {results.slice(0, visible).map((result) => {
+              const handle = result.user.handle.toLowerCase();
+              const match = matchByHandle.get(handle);
+              return (
+                <li key={result.user.id}>
+                  <div className="film-people-person">
+                    <a href={`https://letterboxd.com/${encodeURIComponent(result.user.handle)}/`} target="_blank" rel="noreferrer">{result.user.displayName}</a>
+                    <small>@{result.user.handle}</small>
+                    {following.has(handle) && <span className="tag">{tr ? "takip ediyorum" : "I follow"}</span>}
+                    {followers.has(handle) && <span className="tag">{tr ? "beni takip ediyor" : "follows me"}</span>}
+                    <span className="tag subtle">{result.user.source === "upload" ? "export" : result.user.ratingsScannedAt ? (tr ? "tam liste" : "full list") : "RSS"}</span>
+                    {match && match.commonCount > 0 && (
+                      <button className="tag score-tag" onClick={() => onSelectMatch(match)}>
+                        {tr ? "zevk" : "taste"} {match.score}
+                      </button>
+                    )}
+                    <b>{result.matched}/{criteria.length}</b>
+                  </div>
+                  <div className="film-people-ratings">
+                    {result.rows.map((row) => (
+                      <span key={row.key} className={row.met ? "met" : row.film ? "seen" : "unknown"} title={filmLabel(row.key)}>
+                        {filmLabel(row.key).slice(0, 28)}: {row.film?.rating !== undefined ? formatRating(row.film.rating) : row.film ? (row.film.liked ? "♥" : "✓") : "?"}
+                      </span>
+                    ))}
+                  </div>
+                </li>
+              );
+            })}
+          </ol>
+          {results.length > visible && (
+            <button className="browser-scan-button" onClick={() => setVisible((value) => value + 100)}>
+              {tr ? `Daha fazla (${results.length - visible})` : `Show more (${results.length - visible})`}
+            </button>
+          )}
+        </>
+      )}
+    </details>
+  );
+}
+
 function FullRefreshPanel({ language, steps, running }: { language: Language; steps: FullRefreshStep[]; running: boolean }) {
   const tr = language === "tr";
   const labels: Record<FullRefreshStep["id"], [string, string]> = {
     own: tr ? ["Kendi son filmlerin", "RSS'teki yeni puan ve diary kayitlarin arsive eklenir."] : ["Your recent films", "New ratings and diary entries from RSS join your archive."],
     scan: tr ? ["Takip, takipci ve ag", "Letterboxd sekmesinde eklenti tum listeleri ve ikinci halkayi tarar; takipci gecmisi guncellenir."] : ["Following, followers, network", "The extension scans every list and the second ring in your Letterboxd tab; follower history updates."],
     activity: tr ? ["Herkesin film aktivitesi", "Takip, takipci ve ag adaylarinin RSS puanlari alinir, zevk skorlari yeniden hesaplanir."] : ["Everyone's film activity", "RSS ratings for following, followers and network candidates; taste scores are recalculated."],
+    ratings: tr ? ["En iyi eslesmelerin tam puanlari", "Eklenti en iyi 40 eslesmenin Letterboxd film sayfalarini okur; RSS'teki son 50 filmle sinirli kalmaz. 30 gun icinde okunanlar atlanir."] : ["Full ratings of top matches", "The extension reads the film pages of the top 40 matches, beyond RSS's last 50 films. Members read in the last 30 days are skipped."],
     tmdb: tr ? ["TMDB film bilgisi", "Sure, tur, yonetmen, oyuncu ve oneriler eklenir (token gerekir)."] : ["TMDB film data", "Runtime, genres, directors, cast and recommendations (token required)."],
     backup: tr ? ["Bulut yedegi", "Secili senkron klasorune yedek yazilir."] : ["Cloud backup", "A backup is written to your sync folder."],
   };
@@ -4499,7 +4902,7 @@ function ScanStatusPanel({
             </span>
           </button>
         ) : null}
-        {!running && failed && (
+        {!running && failed && progress?.mode !== "ratings" && (
           <button className="browser-scan-button" onClick={() => onResume(false)}>
             <Globe2 size={15} />
             <span>{language === "tr" ? "Bastan tara" : "Scan from scratch"}</span>

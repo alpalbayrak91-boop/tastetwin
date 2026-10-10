@@ -23,6 +23,9 @@ const tmdbCacheFile = path.join(dataDir, "tmdb-cache.json");
 const scanStateFile = path.join(dataDir, "scan-state.json");
 const preparedExtensionDir = path.join(dataDir, "chrome-extension");
 const settingsFile = path.join(dataDir, "settings.json");
+const filmRatingsFile = path.join(dataDir, "film-ratings.json");
+const MAX_SCRAPED_FILMS_PER_MEMBER = 20000;
+const MAX_RATINGS_REQUEST_HANDLES = 500;
 const CLOUD_BACKUP_SUBDIR = "TasteTwin";
 const CLOUD_BACKUP_LATEST = "tastetwin-latest.json";
 const CLOUD_BACKUP_KEEP = 14;
@@ -37,6 +40,9 @@ const browserUserAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/
 const socialCache = new Map();
 const bridgeCache = new Map();
 const tmdbCache = new Map();
+// Full public film ratings read by the extension, keyed by member handle.
+const filmRatings = new Map();
+let filmRatingsWriteTimer;
 let pendingExtensionScan;
 let pendingManageAction;
 let relationshipEvents = [];
@@ -54,7 +60,7 @@ const PUBLIC_SOCIAL_PAGE_LIMIT = 8;
 const PENDING_SCAN_MS = 15 * 60 * 1000;
 const PENDING_MANAGE_MS = 10 * 60 * 1000;
 
-await Promise.all([restoreBridgeCache(), restoreTmdbCache(), restoreScanState()]);
+await Promise.all([restoreBridgeCache(), restoreTmdbCache(), restoreScanState(), restoreFilmRatings()]);
 
 const server = createServer(async (req, res) => {
   try {
@@ -84,6 +90,61 @@ const server = createServer(async (req, res) => {
       return;
     }
 
+    if (url.pathname === "/api/extension/request-ratings" && req.method === "POST") {
+      if (req.headers["x-tastetwin-request"] !== "app") {
+        sendJson(res, 403, { error: "app_request_required" });
+        return;
+      }
+      const body = await readJsonBody(req);
+      const handle = normalizeHandle(body.handle);
+      const handles = [...new Set((Array.isArray(body.handles) ? body.handles : []).map(normalizeHandle).filter(Boolean))]
+        .slice(0, MAX_RATINGS_REQUEST_HANDLES);
+      if (!handle || !handles.length) {
+        sendJson(res, 400, { error: "invalid_ratings_request" });
+        return;
+      }
+      pendingExtensionScan = {
+        handle,
+        mode: "ratings",
+        handles,
+        maxPages: Math.min(40, Math.max(1, Number.parseInt(body.maxPages, 10) || 8)),
+        requestedAt: new Date().toISOString(),
+        expiresAt: Date.now() + PENDING_SCAN_MS,
+      };
+      scanCancelRequests.delete(handle);
+      sendJson(res, 200, { ok: true, handle, mode: "ratings", members: handles.length, requestedAt: pendingExtensionScan.requestedAt });
+      return;
+    }
+
+    if (url.pathname === "/api/extension/film-ratings" && req.method === "POST") {
+      const body = await readJsonBody(req, 16 * 1024 * 1024);
+      const handle = normalizeHandle(body.handle);
+      if (!handle || !Array.isArray(body.films)) {
+        sendJson(res, 400, { error: "invalid_film_ratings" });
+        return;
+      }
+      const films = sanitizeScrapedFilms(body.films);
+      filmRatings.set(handle, {
+        handle,
+        scannedAt: typeof body.scannedAt === "string" ? body.scannedAt : new Date().toISOString(),
+        complete: body.complete === true,
+        pages: Number.isFinite(Number(body.pages)) ? Number(body.pages) : undefined,
+        films,
+      });
+      queueFilmRatingsWrite();
+      sendJson(res, 200, { ok: true, handle, films: films.length });
+      return;
+    }
+
+    if (url.pathname === "/api/letterboxd/film-ratings" && req.method === "GET") {
+      const requested = (url.searchParams.get("handles") ?? "").split(/[,\s]+/).map(normalizeHandle).filter(Boolean);
+      const since = Date.parse(url.searchParams.get("since") ?? "");
+      const entries = (requested.length ? requested.map((handle) => filmRatings.get(handle)) : [...filmRatings.values()])
+        .filter((entry) => entry && (!Number.isFinite(since) || Date.parse(entry.scannedAt) >= since));
+      sendJson(res, 200, { members: entries.map(filmRatingsToUser) });
+      return;
+    }
+
     if (url.pathname === "/api/extension/claim-scan" && req.method === "POST") {
       const body = await readJsonBody(req);
       const handle = String(body.handle ?? "").trim().replace(/^@/, "").toLowerCase();
@@ -98,7 +159,13 @@ const server = createServer(async (req, res) => {
         res,
         200,
         pending
-          ? { pending: true, mode: pending.mode, resume: pending.resume === true, requestedAt: pending.requestedAt }
+          ? {
+              pending: true,
+              mode: pending.mode,
+              resume: pending.resume === true,
+              requestedAt: pending.requestedAt,
+              ...(pending.mode === "ratings" ? { handles: pending.handles, maxPages: pending.maxPages } : {}),
+            }
           : { pending: false },
       );
       return;
@@ -190,7 +257,7 @@ const server = createServer(async (req, res) => {
         candidates: Number.isFinite(Number(body.candidates)) ? Number(body.candidates) : undefined,
         failedConnectors: Number.isFinite(Number(body.failedConnectors)) ? Number(body.failedConnectors) : undefined,
         handle,
-        mode: body.mode === "social" ? "social" : "full",
+        mode: ["social", "ratings"].includes(body.mode) ? body.mode : "full",
         startedAt: isoOrUndefined(body.startedAt),
         updatedAt: isoOrUndefined(body.updatedAt) ?? new Date().toISOString(),
         receivedAt: new Date().toISOString(),
@@ -1313,6 +1380,78 @@ function sendText(res, status, body, contentType) {
     "Cache-Control": "no-store",
   });
   res.end(body);
+}
+
+function sanitizeScrapedFilms(rawFilms) {
+  const films = new Map();
+  for (const raw of rawFilms.slice(0, MAX_SCRAPED_FILMS_PER_MEMBER)) {
+    if (!raw || typeof raw !== "object") continue;
+    const slug = typeof raw.slug === "string" && /^[a-z0-9-]{1,160}$/.test(raw.slug) ? raw.slug : "";
+    const title = typeof raw.title === "string" ? raw.title.trim().slice(0, 300) : "";
+    if (!slug || !title) continue;
+    const year = Number.isInteger(raw.year) && raw.year > 1870 && raw.year < 2200 ? raw.year : undefined;
+    const rating = typeof raw.rating === "number" && raw.rating >= 0.5 && raw.rating <= 5 && Number.isInteger(raw.rating * 2) ? raw.rating : undefined;
+    films.set(slug, { slug, title, year, rating, liked: raw.liked === true });
+  }
+  return [...films.values()];
+}
+
+// Scraped grid entries become the same film records RSS and exports produce,
+// so matching, archive filters and network ratings use them unchanged.
+function filmRatingsToUser(entry) {
+  return {
+    handle: entry.handle,
+    scannedAt: entry.scannedAt,
+    complete: entry.complete,
+    pages: entry.pages,
+    films: entry.films.map((film) => ({
+      key: filmKey(film.title, film.year),
+      slug: film.slug,
+      title: film.title,
+      year: film.year,
+      uri: `https://letterboxd.com/film/${film.slug}/`,
+      rating: film.rating,
+      liked: film.liked || undefined,
+      watched: true,
+      watchedDates: [],
+      rewatches: 0,
+      genres: [],
+      directors: [],
+      countries: [],
+    })),
+  };
+}
+
+function queueFilmRatingsWrite() {
+  if (filmRatingsWriteTimer) return;
+  filmRatingsWriteTimer = setTimeout(() => {
+    filmRatingsWriteTimer = undefined;
+    void persistFilmRatings();
+  }, 1500);
+}
+
+async function persistFilmRatings() {
+  try {
+    await mkdir(dataDir, { recursive: true });
+    const temporaryFile = `${filmRatingsFile}.tmp`;
+    await writeFile(temporaryFile, JSON.stringify(Object.fromEntries(filmRatings)), "utf8");
+    await rename(temporaryFile, filmRatingsFile);
+  } catch (error) {
+    console.warn("[ratings] save failed", errorMessage(error));
+  }
+}
+
+async function restoreFilmRatings() {
+  try {
+    const saved = JSON.parse(await readFile(filmRatingsFile, "utf8"));
+    for (const [handle, entry] of Object.entries(saved ?? {})) {
+      if (!normalizeHandle(handle) || !Array.isArray(entry?.films)) continue;
+      filmRatings.set(handle, { ...entry, handle, films: sanitizeScrapedFilms(entry.films) });
+    }
+    if (filmRatings.size) console.log("[ratings] restored", { members: filmRatings.size });
+  } catch (error) {
+    if (error?.code !== "ENOENT") console.warn("[ratings] restore failed", errorMessage(error));
+  }
 }
 
 async function loadSettings() {

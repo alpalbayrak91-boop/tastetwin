@@ -48,6 +48,13 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     return true;
   }
 
+  if (message?.type === "saveFilmRatings") {
+    appFetch("/api/extension/film-ratings", { method: "POST", body: message.payload })
+      .then(() => sendResponse({ ok: true }))
+      .catch((error) => sendResponse({ ok: false, error: String(error.message ?? error) }));
+    return true;
+  }
+
   if (message?.type === "saveCheckpoint") {
     appFetch("/api/extension/checkpoint", { method: "POST", body: message.checkpoint })
       .then(() => sendResponse({ ok: true }))
@@ -207,7 +214,7 @@ async function beginScan(handle, mode, startedAt) {
       state: "starting",
       phase: "starting",
       percent: 0,
-      text: mode === "social" ? "Sosyal tarama baslatiliyor" : "Sosyal ve ag taramasi baslatiliyor",
+      text: mode === "ratings" ? "Film puani taramasi baslatiliyor" : mode === "social" ? "Sosyal tarama baslatiliyor" : "Sosyal ve ag taramasi baslatiliyor",
       handle,
       mode,
       startedAt: startedAt ?? new Date().toISOString(),

@@ -14,9 +14,23 @@ Kaynaklar web aramasindan; magaza sayilari ve surumler o gunun goruntusudur.
 | [Sam Learner letterboxd_recommendations](https://baselight.app/u/kaggle/dataset/samlearner_letterboxd_movie_ratings_data) | En aktif 4000 kullanicinin puanlariyla oneri modeli. | Buyuk veri kumesi gerektirir; TasteTwin kendi agindaki kisilerle aciklanabilir oneri yapiyor. |
 | [Lekkerboxd](https://chromewebstore.google.com/detail/kilfhpgnabhobfinmljmgojmbndcpeph) | Izlenen/puanlanan filmlerden TMDB, Reddit, Taste.io sinyalleriyle oneri. | TMDB onerileri zaten kullaniliyor. |
 
+## Letterboxd veri cekme: digerleri nasil yapiyor? (10 Ekim 2026)
+
+| Kaynak | Yontem | Not |
+|---|---|---|
+| [letterboxdpy](https://github.com/nmcassa/letterboxdpy) | Python, profil/film sayfalarini HTML olarak ayristirir. | `user_films.py`: `/<uye>/films`, puan filtresi `/films/rated/<puan>/by/date`; ogeler `li.griditem` (React), `li.poster-container` (eski), `li.posteritem`; puan `rated-X` sinifi / 2; sayfa basina 72 film. `movies_extractor.py`: slug `data-item-slug` veya `data-film-slug`, ad `data-item-name` veya `img alt`, kimlik `data-postered-identifier` JSON `uid` veya `data-film-id`. `movie_members.py`: `/film/<slug>/members`; fans/likes/reviews sayfalari "TODO". **TasteTwin ayristiricisi bu secicilerle yazildi.** |
+| [Apify crawlerbros](https://apify.com/crawlerbros/letterboxd-scraper) | Sunucudan Chrome TLS taklidiyle istek. | Letterboxd'un React arayuzu Cloudflare arkasinda; duz HTTP istemcileri engellenebiliyor. TasteTwin bu yuzden kullanicinin kendi tarayicisinda (eklenti) okuyor. |
+| [Apify haketa](https://apify.com/haketa/letterboxd-scraper) | Uye son izleme/puan gecmisi. | Son ~100 aktiviteyle sinirli; tam liste icin film sayfalari gerekir. |
+| Apify scrapers_lat / solidcode | Film, puan, yorum alanlari. | Resmi Letterboxd API'si davetle; herkese acik sayfalari okumak yaygin yol. |
+| [Sam Learner veri kumesi](https://baselight.app/u/kaggle/dataset/samlearner_letterboxd_movie_ratings_data) | En aktif 4000 uyenin puanlarini tarayip oneri modeli kurdu. | Puanlar yarim yildiz 1-10 olarak tutuluyor; TasteTwin de ayni `rated-N` olcegini kullaniyor. |
+| [Film fans sayfasi](https://letterboxd.com/film/python/fans/) | Filmi dort favorisinden biri yapan uyeler. | Dogrulanmis URL. "Bu filmi cok sevenler" icin ileride eklentiyle okunabilir. |
+
+Yasal/kullanim notu: Letterboxd kosullari otomatik veri toplamayi kisitliyor. TasteTwin yalniz kullanicinin baslattigi, secili kisilerle sinirli, yavas (1,4 sn) ve 429'da geri cekilen bir okuma yapiyor; veriyi disari gondermiyor.
+
 ## Siradaki fikirler (oncelik sirasiyla)
 
-1. **Uye puan sayfalarini eklentiyle okumak** (`/<uye>/films/ratings/`): RSS yalniz son ~50 aktiviteyi veriyor; tam puan listesi eslesme dogrulugunu ciddi artirir. Letterboxd kosullari otomatik toplamayi kisitliyor; yavas, kullanici baslatmali ve sinirli olmali. Yerelde gercek HTML ile gelistirilmeli.
+1. ~~Uye puan sayfalarini eklentiyle okumak~~ **Uygulandi (10 Ekim)**; canli sayfada secicilerin dogrulanmasi bekliyor.
+1b. Secilen film icin `/film/<slug>/fans/` sayfasindan "bu filmi favorisi yapanlari" okuyup kesif adayi yapmak (filmden kisi bul'un Letterboxd geneline acilmasi).
 2. Yila gore ozet ("Wrapped"): en cok izlenen yonetmen, en uzun seri, en cok konusulan kisi.
 3. "Birlikte izleyin" listesine tur/yil/TMDB puani filtresi (Blend'deki gibi).
 4. Ilginc ayrisma modu: zevki benzeyip belirli filmlerde tam ters dusen kisiler.

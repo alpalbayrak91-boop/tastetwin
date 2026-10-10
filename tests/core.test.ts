@@ -9,6 +9,8 @@ import type { FilmSignal, UserTaste } from "../src/types";
 import { buildWatchTogetherPicks, filterWatchTogetherPicks, togetherPickReason } from "../src/lib/watch-together";
 import { socialDirectoryCsv } from "../src/lib/social-export";
 import { archiveCsv, archiveFacet, buildNetworkRatings, defaultArchiveFilters, filterArchive, type ArchiveFilters } from "../src/lib/archive-filters";
+import { buildFilmCatalog, filmPeopleCsv, findPeopleByFilms, defaultFilmPeopleOptions, searchFilmCatalog } from "../src/lib/film-people";
+import { pickRatingsTargets, scrapedMembersToUsers } from "../src/lib/full-ratings";
 import { computeFollowerChanges, followerEventsCsv, type FollowerScan } from "../src/lib/follower-history";
 import { buildSocialDirectory, filterAndSortSocialDirectory, paginateSocialDirectory, type SocialDirectoryFilters } from "../src/lib/social-directory";
 
@@ -272,4 +274,58 @@ test("archive filters combine metadata, ranges, diary year and network ratings",
   const csv = archiveCsv(filterArchive(owner.films, { ...defaultArchiveFilters, genre: "Drama", sort: "title" }, network), network, "en").trim().split("\r\n");
   assert.equal(csv.length, 3);
   assert.match(csv[2], /"4.5","2"/);
+});
+
+test("scraped film pages become RSS users without replacing exports or repeating a scan", () => {
+  const owner = { ...user("owner", [film("a", { rating: 5 })]), source: "upload" as const };
+  const known = { ...user("ece", [film("a", { rating: 4 })]), id: "rss-ece", source: "rss" as const, displayName: "Ece" };
+  const scraped = [
+    { handle: "ece", scannedAt: "2026-10-10T10:00:00Z", complete: true, films: [film("a", { rating: 3.5, slug: "a" }), film("b", { rating: 2 })] },
+    { handle: "owner", scannedAt: "2026-10-10T10:00:00Z", films: [film("a", { rating: 1 })] },
+    { handle: "new", scannedAt: "2026-10-10T10:00:00Z", films: [film("c", { rating: 4 })] },
+  ];
+  const incoming = scrapedMembersToUsers(scraped, [owner, known], "owner");
+  assert.deepEqual(incoming.map((u) => u.id), ["rss-ece", "rss-new"]);
+  assert.equal(incoming[0].displayName, "Ece");
+  assert.equal(incoming[0].ratingsComplete, true);
+  const merged = mergeFilmArchive(known, incoming[0]);
+  assert.equal(merged.films.find((f) => f.key === "a")?.rating, 3.5, "the full page rating is current");
+  assert.equal(merged.ratingsScannedAt, "2026-10-10T10:00:00Z");
+  assert.equal(scrapedMembersToUsers(scraped, [owner, merged], "owner").some((u) => u.handle === "ece"), false);
+});
+
+test("ratings targets skip fresh reads and prefer never-read, higher-ranked members", () => {
+  const now = new Date().toISOString();
+  const users = [
+    { ...user("fresh", []), source: "rss" as const, ratingsScannedAt: now },
+    { ...user("old", []), source: "rss" as const, ratingsScannedAt: "2020-01-01T00:00:00Z" },
+    { ...user("me", []), source: "upload" as const },
+  ];
+  const targets = pickRatingsTargets([{ handle: "fresh", rank: 99 }, { handle: "old", rank: 90 }, { handle: "low", rank: 10 }, { handle: "high", rank: 80 }, { handle: "me", rank: 100 }, { handle: "High", rank: 1 }], users, 3);
+  assert.deepEqual(targets, ["high", "low", "old"]);
+});
+
+test("film-based people search separates lovers, haters and unknown", () => {
+  const people = [
+    user("lover", [film("a", { rating: 5 }), film("b", { rating: 4 })]),
+    user("hater", [film("a", { rating: 1 }), film("b", { rating: 2 })]),
+    user("mixed", [film("a", { rating: 4.5 }), film("b", { rating: 1.5 })]),
+    user("heart", [film("a", { liked: true, watched: true })]),
+    user("unknown", [film("z", { rating: 5 })]),
+  ];
+  const names = (criteria: Parameters<typeof findPeopleByFilms>[1], match: "all" | "any" = "all") =>
+    findPeopleByFilms(people, criteria, { ...defaultFilmPeopleOptions, match }).map((r) => r.user.handle);
+  assert.deepEqual(names([{ key: "a", condition: "loved" }]), ["lover", "mixed", "heart"]);
+  assert.deepEqual(names([{ key: "a", condition: "loved" }, { key: "b", condition: "loved" }]), ["lover"]);
+  assert.deepEqual(names([{ key: "a", condition: "loved" }, { key: "b", condition: "disliked" }]), ["mixed"]);
+  assert.deepEqual(names([{ key: "a", condition: "disliked" }, { key: "b", condition: "disliked" }], "any"), ["hater", "mixed"]);
+  assert.ok(!names([{ key: "a", condition: "disliked" }]).includes("unknown"), "missing film is not a dislike");
+  const catalog = buildFilmCatalog(people);
+  assert.equal(catalog[0].key, "a");
+  assert.equal(catalog[0].raters, 4);
+  assert.deepEqual(searchFilmCatalog(catalog, "b").map((e) => e.key), ["b"]);
+  const results = findPeopleByFilms(people, [{ key: "a", condition: "rated" }], defaultFilmPeopleOptions);
+  const csv = filmPeopleCsv(results, [{ key: "a", condition: "rated" }], new Map(catalog.map((e) => [e.key, e])), "en").trim().split("\r\n");
+  assert.equal(csv.length, 4);
+  assert.match(csv[1], /"lover".*"5"$/);
 });

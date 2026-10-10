@@ -10,10 +10,11 @@ TasteTwin processes Letterboxd export files, public profile activity, and follow
 - Following and follower lists selected by the user
 - Movie ratings, likes, diary entries, reviews, watchlist entries, and watched films contained in a user-provided Letterboxd export
 - Recent public activity available through Letterboxd RSS feeds
+- Public film ratings and likes shown on members' Letterboxd film pages, read by the extension only when the user starts a "full rating lists" scan for selected members
 
 ## Storage and transfer
 
-TasteTwin stores application data locally on the user's computer. The Chrome extension sends scan results only to the TasteTwin application at `http://127.0.0.1:5173` on the same computer. TasteTwin does not operate a remote analytics or advertising server and does not sell or share this data.
+TasteTwin stores application data locally on the user's computer. The Chrome extension sends scan results, including any member film ratings it read, only to the TasteTwin application at `http://127.0.0.1:5173` on the same computer. TasteTwin does not operate a remote analytics or advertising server and does not sell or share this data.
 
 If the user chooses a cloud backup folder, TasteTwin writes backup files into that folder on the same computer. Uploading them is done by the user's own sync application (for example Google Drive, OneDrive, iCloud Drive or Dropbox) under that provider's terms. TasteTwin itself does not connect to those services or receive their credentials. Backups exclude the TMDB token. Turning the option off stops further writes; existing backup files stay in the folder until the user deletes them.
 

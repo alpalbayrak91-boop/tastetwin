@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "TasteTwin Letterboxd Scanner",
-  "version": "0.5.0",
-  "description": "Scans your visible Letterboxd social graph and sends it to your local TasteTwin app.",
+  "version": "0.6.0",
+  "description": "Scans your visible Letterboxd social graph and members' public film ratings and sends them to your local TasteTwin app.",
   "icons": {
     "16": "icons/icon-16.png",
     "32": "icons/icon-32.png",
@@ -26,7 +26,7 @@
   "content_scripts": [
     {
       "matches": ["https://letterboxd.com/*"],
-      "js": ["content.js"],
+      "js": ["film-grid.js", "content.js"],
       "run_at": "document_idle"
     }
   ]
