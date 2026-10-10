@@ -1,7 +1,7 @@
 {
   "name": "tastetwin",
   "private": true,
-  "version": "0.5.0",
+  "version": "0.6.0",
   "productName": "TasteTwin",
   "description": "Local-first Letterboxd social graph and movie taste matching app.",
   "author": "TasteTwin",
@@ -11,7 +11,7 @@
     "test": "npm run test:unit && npm run test:bridge",
     "test:unit": "node scripts/test-core.mjs && node scripts/test-conversations.mjs",
     "test:bridge": "node scripts/verify-bridge.mjs && node --test tests/api.test.mjs",
-    "test:browser": "npm run build && node scripts/test-browser.mjs",
+    "test:browser": "npm run build && node scripts/test-extension-parser.mjs && node scripts/test-browser.mjs",
     "test:storage": "node scripts/test-storage.mjs",
     "dev": "vite --host 127.0.0.1",
     "package-extension": "node scripts/package-extension.mjs",

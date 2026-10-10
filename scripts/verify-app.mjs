@@ -1,5 +1,7 @@
 import { createRequire } from "node:module";
-import { readFile } from "node:fs/promises";
+import { mkdtemp, readdir, readFile, rm } from "node:fs/promises";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 
 const require = createRequire(import.meta.url);
 const { chromium } = require("playwright");
@@ -7,7 +9,7 @@ const screenshotPath = process.env.TASTETWIN_SCREENSHOT ?? "tastetwin-verified.p
 const appUrl = process.env.TASTETWIN_APP_URL;
 if (!appUrl) throw new Error("Use npm run test:browser to run against isolated test data");
 const { version: appVersion } = JSON.parse(await readFile(new URL("../package.json", import.meta.url), "utf8"));
-const browser = await chromium.launch({ headless: true });
+const browser = await chromium.launch({ headless: true, executablePath: process.env.TASTETWIN_CHROMIUM_PATH || undefined });
 const page = await browser.newPage({ viewport: { width: 1440, height: 1000 } });
 const consoleErrors = [];
 
@@ -210,6 +212,26 @@ if (
 ) {
   throw new Error("Local backup export is incomplete or leaked a token");
 }
+if (typeof backup.followerBaselines !== "object") throw new Error("Backup is missing follower baselines");
+
+// Personal cloud backup: a sync-client folder (simulated by a temp folder) receives the backup and restores it.
+const cloudFolder = await mkdtemp(path.join(path.dirname(fileURLToPath(import.meta.url)), "..", ".codex-artifacts", "cloud-ui-"));
+try {
+  await page.getByLabel("Bulut yedek klasoru").fill(cloudFolder);
+  await page.locator(".cloud-backup").getByRole("button", { name: "Kaydet", exact: true }).click();
+  await page.getByText(/Son yedek:/).waitFor();
+  const cloudFiles = await readdir(path.join(cloudFolder, "TasteTwin"));
+  if (!cloudFiles.includes("tastetwin-latest.json")) throw new Error("Cloud folder backup was not written");
+  const cloudCopy = JSON.parse(await readFile(path.join(cloudFolder, "TasteTwin", "tastetwin-latest.json"), "utf8"));
+  if (cloudCopy.state.users.length !== 56 || "tmdbToken" in cloudCopy) throw new Error("Cloud folder backup is incomplete or leaked a token");
+  page.once("dialog", (dialog) => dialog.accept());
+  await page.getByRole("button", { name: "Buluttan geri yukle" }).click();
+  await page.getByText(/Yedek geri yuklendi: 56 profil/).waitFor();
+  await page.locator(".cloud-backup").getByRole("button", { name: "Kapat", exact: true }).click();
+  await page.getByText("Bulut yedegi kapatildi.").waitFor();
+} finally {
+  await rm(cloudFolder, { recursive: true, force: true });
+}
 await page.locator(".film-data-health").waitFor();
 if (!(await page.locator(".film-data-health").innerText()).includes("film TMDB verili")) {
   throw new Error("Exact film data coverage is missing");
@@ -239,6 +261,24 @@ await page.locator(".archive-browser-controls input").fill("");
 await page.locator(".archive-browser-controls select").first().selectOption("watchlist");
 if (!(await page.locator('[data-testid="film-archive-browser"]').innerText()).includes("Watchlist Only")) {
   throw new Error("Unwatched watchlist archive filter failed");
+}
+await page.locator(".archive-browser-controls select").first().selectOption("all");
+await page.getByRole("button", { name: /Detayli filtre/ }).click();
+await page.getByLabel("En dusuk puan").fill("5");
+const fiveStarText = await page.locator('[data-testid="film-archive-browser"]').innerText();
+if (!/\d+\/\d+ film gosteriliyor/.test(fiveStarText) || (await page.locator(".archive-row").count()) === 0) {
+  throw new Error("Archive rating range filter failed");
+}
+const archiveDownload = page.waitForEvent("download");
+await page.locator(".archive-browser-controls").getByRole("button", { name: "CSV" }).click();
+const archiveCsvText = await readFile(await (await archiveDownload).path(), "utf8");
+if (!archiveCsvText.includes("Ag ortalamasi") || archiveCsvText.split("\r\n").filter(Boolean).length < 2) {
+  throw new Error("Filtered archive CSV export failed");
+}
+await page.getByRole("button", { name: /Filtreleri temizle/ }).click();
+if ((await page.locator(".archive-row").count()) !== 50) throw new Error("Clearing archive filters did not restore the archive");
+if ((await page.getByRole("button", { name: "Tum verileri tek tusla guncelle" }).count()) !== 1) {
+  throw new Error("One-click refresh button is missing");
 }
 await page.screenshot({ path: screenshotPath.replace(/\.png$/i, "-history.png"), fullPage: true });
 await page.locator(".film-workspace-tabs button").filter({ hasText: "Genel bakis" }).click();
@@ -374,6 +414,20 @@ if ((await page.locator(".together-planner .together-pick").count()) !== 1 || !(
 await page.getByLabel("Sadece ortak watchlist", { exact: true }).uncheck();
 await page.screenshot({ path: screenshotPath.replace(/\.png$/i, "-shortlist.png") });
 await page.keyboard.press("Escape");
+// Film-based people search: all 55 candidates rated "Watchlist Only" 4.5.
+await page.locator(".film-people > summary").click();
+await page.getByLabel("Film ara").fill("Watchlist Only");
+await page.locator(".film-suggestions strong", { hasText: /^Watchlist Only$/ }).click();
+const filmPeopleCount = async (expected) => page.locator(".film-people .muted-line strong", { hasText: new RegExp(`^${expected}$`) }).waitFor({ timeout: 5000 }).catch(async () => {
+  throw new Error(`Film people search expected ${expected}: ${await page.locator(".film-people").innerText()}`);
+});
+await filmPeopleCount(55);
+await page.locator(".film-criteria select").selectOption("disliked");
+await filmPeopleCount(0);
+await page.locator(".film-criteria select").selectOption("loved");
+await filmPeopleCount(55);
+if ((await page.locator(".film-people-results li").count()) !== 50) throw new Error("Film people results should page at 50");
+if (!(await page.locator(".insight-tool").first().innerText()).includes("Tam puan listeleri")) throw new Error("Full ratings panel missing");
 await page.setViewportSize({ width: 390, height: 844 });
 await page.reload({ waitUntil: "networkidle" });
 const overflow = await page.evaluate(() => document.documentElement.scrollWidth - window.innerWidth);

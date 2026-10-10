@@ -1,7 +1,8 @@
 import { createServer } from "node:http";
-import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
+import { mkdir, readdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import path from "node:path";
+import os from "node:os";
 import { fileURLToPath } from "node:url";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
@@ -21,6 +22,14 @@ const bridgeCacheFile = path.join(dataDir, "bridge-cache.json");
 const tmdbCacheFile = path.join(dataDir, "tmdb-cache.json");
 const scanStateFile = path.join(dataDir, "scan-state.json");
 const preparedExtensionDir = path.join(dataDir, "chrome-extension");
+const settingsFile = path.join(dataDir, "settings.json");
+const filmRatingsFile = path.join(dataDir, "film-ratings.json");
+const MAX_SCRAPED_FILMS_PER_MEMBER = 20000;
+const MAX_RATINGS_REQUEST_HANDLES = 500;
+const CLOUD_BACKUP_SUBDIR = "TasteTwin";
+const CLOUD_BACKUP_LATEST = "tastetwin-latest.json";
+const CLOUD_BACKUP_KEEP = 14;
+const CLOUD_BACKUP_MAX_BYTES = 250 * 1024 * 1024;
 const port = Number(process.env.PORT ?? 5173);
 const parser = new XMLParser({
   ignoreAttributes: false,
@@ -31,6 +40,9 @@ const browserUserAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/
 const socialCache = new Map();
 const bridgeCache = new Map();
 const tmdbCache = new Map();
+// Full public film ratings read by the extension, keyed by member handle.
+const filmRatings = new Map();
+let filmRatingsWriteTimer;
 let pendingExtensionScan;
 let pendingManageAction;
 let relationshipEvents = [];
@@ -48,7 +60,7 @@ const PUBLIC_SOCIAL_PAGE_LIMIT = 8;
 const PENDING_SCAN_MS = 15 * 60 * 1000;
 const PENDING_MANAGE_MS = 10 * 60 * 1000;
 
-await Promise.all([restoreBridgeCache(), restoreTmdbCache(), restoreScanState()]);
+await Promise.all([restoreBridgeCache(), restoreTmdbCache(), restoreScanState(), restoreFilmRatings()]);
 
 const server = createServer(async (req, res) => {
   try {
@@ -78,6 +90,61 @@ const server = createServer(async (req, res) => {
       return;
     }
 
+    if (url.pathname === "/api/extension/request-ratings" && req.method === "POST") {
+      if (req.headers["x-tastetwin-request"] !== "app") {
+        sendJson(res, 403, { error: "app_request_required" });
+        return;
+      }
+      const body = await readJsonBody(req);
+      const handle = normalizeHandle(body.handle);
+      const handles = [...new Set((Array.isArray(body.handles) ? body.handles : []).map(normalizeHandle).filter(Boolean))]
+        .slice(0, MAX_RATINGS_REQUEST_HANDLES);
+      if (!handle || !handles.length) {
+        sendJson(res, 400, { error: "invalid_ratings_request" });
+        return;
+      }
+      pendingExtensionScan = {
+        handle,
+        mode: "ratings",
+        handles,
+        maxPages: Math.min(40, Math.max(1, Number.parseInt(body.maxPages, 10) || 8)),
+        requestedAt: new Date().toISOString(),
+        expiresAt: Date.now() + PENDING_SCAN_MS,
+      };
+      scanCancelRequests.delete(handle);
+      sendJson(res, 200, { ok: true, handle, mode: "ratings", members: handles.length, requestedAt: pendingExtensionScan.requestedAt });
+      return;
+    }
+
+    if (url.pathname === "/api/extension/film-ratings" && req.method === "POST") {
+      const body = await readJsonBody(req, 16 * 1024 * 1024);
+      const handle = normalizeHandle(body.handle);
+      if (!handle || !Array.isArray(body.films)) {
+        sendJson(res, 400, { error: "invalid_film_ratings" });
+        return;
+      }
+      const films = sanitizeScrapedFilms(body.films);
+      filmRatings.set(handle, {
+        handle,
+        scannedAt: typeof body.scannedAt === "string" ? body.scannedAt : new Date().toISOString(),
+        complete: body.complete === true,
+        pages: Number.isFinite(Number(body.pages)) ? Number(body.pages) : undefined,
+        films,
+      });
+      queueFilmRatingsWrite();
+      sendJson(res, 200, { ok: true, handle, films: films.length });
+      return;
+    }
+
+    if (url.pathname === "/api/letterboxd/film-ratings" && req.method === "GET") {
+      const requested = (url.searchParams.get("handles") ?? "").split(/[,\s]+/).map(normalizeHandle).filter(Boolean);
+      const since = Date.parse(url.searchParams.get("since") ?? "");
+      const entries = (requested.length ? requested.map((handle) => filmRatings.get(handle)) : [...filmRatings.values()])
+        .filter((entry) => entry && (!Number.isFinite(since) || Date.parse(entry.scannedAt) >= since));
+      sendJson(res, 200, { members: entries.map(filmRatingsToUser) });
+      return;
+    }
+
     if (url.pathname === "/api/extension/claim-scan" && req.method === "POST") {
       const body = await readJsonBody(req);
       const handle = String(body.handle ?? "").trim().replace(/^@/, "").toLowerCase();
@@ -92,7 +159,13 @@ const server = createServer(async (req, res) => {
         res,
         200,
         pending
-          ? { pending: true, mode: pending.mode, resume: pending.resume === true, requestedAt: pending.requestedAt }
+          ? {
+              pending: true,
+              mode: pending.mode,
+              resume: pending.resume === true,
+              requestedAt: pending.requestedAt,
+              ...(pending.mode === "ratings" ? { handles: pending.handles, maxPages: pending.maxPages } : {}),
+            }
           : { pending: false },
       );
       return;
@@ -184,7 +257,7 @@ const server = createServer(async (req, res) => {
         candidates: Number.isFinite(Number(body.candidates)) ? Number(body.candidates) : undefined,
         failedConnectors: Number.isFinite(Number(body.failedConnectors)) ? Number(body.failedConnectors) : undefined,
         handle,
-        mode: body.mode === "social" ? "social" : "full",
+        mode: ["social", "ratings"].includes(body.mode) ? body.mode : "full",
         startedAt: isoOrUndefined(body.startedAt),
         updatedAt: isoOrUndefined(body.updatedAt) ?? new Date().toISOString(),
         receivedAt: new Date().toISOString(),
@@ -285,6 +358,65 @@ const server = createServer(async (req, res) => {
       }
       sendJson(res, 200, { ok: true, path: preparedExtensionDir });
       return;
+    }
+
+    if (url.pathname.startsWith("/api/system/cloud-backup")) {
+      // Backups hold the whole archive: only the TasteTwin window may touch them,
+      // never an installed extension.
+      if (req.headers["x-tastetwin-request"] !== "app" || String(req.headers.origin ?? "").startsWith("chrome-extension://")) {
+        sendJson(res, 403, { error: "app_request_required" });
+        return;
+      }
+      if (url.pathname === "/api/system/cloud-backup" && req.method === "GET") {
+        sendJson(res, 200, await cloudBackupStatus());
+        return;
+      }
+      if (url.pathname === "/api/system/cloud-backup/config" && req.method === "POST") {
+        const body = await readJsonBody(req);
+        const folder = typeof body.folder === "string" ? body.folder.trim() : "";
+        if (folder) {
+          if (!path.isAbsolute(folder)) {
+            sendJson(res, 400, { error: "folder_not_absolute" });
+            return;
+          }
+          const info = await stat(folder).catch(() => undefined);
+          if (!info?.isDirectory()) {
+            sendJson(res, 400, { error: "folder_not_found" });
+            return;
+          }
+        }
+        await saveSettings({ ...(await loadSettings()), cloudBackupFolder: folder ? path.resolve(folder) : undefined });
+        sendJson(res, 200, await cloudBackupStatus());
+        return;
+      }
+      if (url.pathname === "/api/system/cloud-backup" && req.method === "POST") {
+        const folder = (await loadSettings()).cloudBackupFolder;
+        if (!folder) {
+          sendJson(res, 409, { error: "folder_not_configured" });
+          return;
+        }
+        const body = await readJsonBody(req, CLOUD_BACKUP_MAX_BYTES);
+        if (body.format !== "tastetwin-backup" || !body.state || typeof body.state !== "object") {
+          sendJson(res, 400, { error: "invalid_backup" });
+          return;
+        }
+        sendJson(res, 200, await writeCloudBackup(folder, body));
+        return;
+      }
+      if (url.pathname === "/api/system/cloud-backup/latest" && req.method === "GET") {
+        const folder = (await loadSettings()).cloudBackupFolder;
+        if (!folder) {
+          sendJson(res, 409, { error: "folder_not_configured" });
+          return;
+        }
+        const content = await readFile(path.join(folder, CLOUD_BACKUP_SUBDIR, CLOUD_BACKUP_LATEST)).catch(() => undefined);
+        if (!content) {
+          sendJson(res, 404, { error: "backup_not_found" });
+          return;
+        }
+        sendText(res, 200, content, "application/json; charset=utf-8");
+        return;
+      }
     }
 
     if (url.pathname === "/api/tmdb/validate" && req.method === "POST") {
@@ -1250,7 +1382,154 @@ function sendText(res, status, body, contentType) {
   res.end(body);
 }
 
-function readJsonBody(req) {
+function sanitizeScrapedFilms(rawFilms) {
+  const films = new Map();
+  for (const raw of rawFilms.slice(0, MAX_SCRAPED_FILMS_PER_MEMBER)) {
+    if (!raw || typeof raw !== "object") continue;
+    const slug = typeof raw.slug === "string" && /^[a-z0-9-]{1,160}$/.test(raw.slug) ? raw.slug : "";
+    const title = typeof raw.title === "string" ? raw.title.trim().slice(0, 300) : "";
+    if (!slug || !title) continue;
+    const year = Number.isInteger(raw.year) && raw.year > 1870 && raw.year < 2200 ? raw.year : undefined;
+    const rating = typeof raw.rating === "number" && raw.rating >= 0.5 && raw.rating <= 5 && Number.isInteger(raw.rating * 2) ? raw.rating : undefined;
+    films.set(slug, { slug, title, year, rating, liked: raw.liked === true });
+  }
+  return [...films.values()];
+}
+
+// Scraped grid entries become the same film records RSS and exports produce,
+// so matching, archive filters and network ratings use them unchanged.
+function filmRatingsToUser(entry) {
+  return {
+    handle: entry.handle,
+    scannedAt: entry.scannedAt,
+    complete: entry.complete,
+    pages: entry.pages,
+    films: entry.films.map((film) => ({
+      key: filmKey(film.title, film.year),
+      slug: film.slug,
+      title: film.title,
+      year: film.year,
+      uri: `https://letterboxd.com/film/${film.slug}/`,
+      rating: film.rating,
+      liked: film.liked || undefined,
+      watched: true,
+      watchedDates: [],
+      rewatches: 0,
+      genres: [],
+      directors: [],
+      countries: [],
+    })),
+  };
+}
+
+function queueFilmRatingsWrite() {
+  if (filmRatingsWriteTimer) return;
+  filmRatingsWriteTimer = setTimeout(() => {
+    filmRatingsWriteTimer = undefined;
+    void persistFilmRatings();
+  }, 1500);
+}
+
+async function persistFilmRatings() {
+  try {
+    await mkdir(dataDir, { recursive: true });
+    const temporaryFile = `${filmRatingsFile}.tmp`;
+    await writeFile(temporaryFile, JSON.stringify(Object.fromEntries(filmRatings)), "utf8");
+    await rename(temporaryFile, filmRatingsFile);
+  } catch (error) {
+    console.warn("[ratings] save failed", errorMessage(error));
+  }
+}
+
+async function restoreFilmRatings() {
+  try {
+    const saved = JSON.parse(await readFile(filmRatingsFile, "utf8"));
+    for (const [handle, entry] of Object.entries(saved ?? {})) {
+      if (!normalizeHandle(handle) || !Array.isArray(entry?.films)) continue;
+      filmRatings.set(handle, { ...entry, handle, films: sanitizeScrapedFilms(entry.films) });
+    }
+    if (filmRatings.size) console.log("[ratings] restored", { members: filmRatings.size });
+  } catch (error) {
+    if (error?.code !== "ENOENT") console.warn("[ratings] restore failed", errorMessage(error));
+  }
+}
+
+async function loadSettings() {
+  try {
+    const saved = JSON.parse(await readFile(settingsFile, "utf8"));
+    return saved && typeof saved === "object" && !Array.isArray(saved) ? saved : {};
+  } catch {
+    return {};
+  }
+}
+
+async function saveSettings(settings) {
+  await mkdir(dataDir, { recursive: true });
+  const temporaryFile = `${settingsFile}.tmp`;
+  await writeFile(temporaryFile, JSON.stringify(settings, null, 2), "utf8");
+  await rename(temporaryFile, settingsFile);
+}
+
+// Folders that desktop sync clients (Google Drive, OneDrive, iCloud, Dropbox)
+// upload automatically. TasteTwin only writes files there; the sync client
+// does the uploading, so no cloud account or token passes through the app.
+function cloudFolderCandidates() {
+  const home = os.homedir();
+  const candidates = [
+    ["Google Drive", path.join(home, "My Drive")],
+    ["Google Drive", path.join(home, "Google Drive")],
+    ["Google Drive", path.join(home, "Google Drive", "My Drive")],
+    ["Google Drive", "G:\\My Drive"],
+    ["Google Drive", "G:\\Drive'ım"],
+    ["OneDrive", process.env.OneDriveConsumer],
+    ["OneDrive", process.env.OneDrive],
+    ["OneDrive", path.join(home, "OneDrive")],
+    ["iCloud Drive", path.join(home, "iCloudDrive")],
+    ["iCloud Drive", path.join(home, "Library", "Mobile Documents", "com~apple~CloudDocs")],
+    ["Dropbox", path.join(home, "Dropbox")],
+  ];
+  const seen = new Set();
+  return candidates
+    .filter(([, folder]) => typeof folder === "string" && folder && existsSync(folder))
+    .map(([provider, folder]) => ({ provider, folder: path.resolve(folder) }))
+    .filter(({ folder }) => !seen.has(folder.toLowerCase()) && seen.add(folder.toLowerCase()));
+}
+
+async function cloudBackupStatus() {
+  const folder = (await loadSettings()).cloudBackupFolder;
+  let latest;
+  if (folder) {
+    const info = await stat(path.join(folder, CLOUD_BACKUP_SUBDIR, CLOUD_BACKUP_LATEST)).catch(() => undefined);
+    if (info) latest = { savedAt: info.mtime.toISOString(), bytes: info.size };
+  }
+  return {
+    folder,
+    folderAvailable: folder ? existsSync(folder) : false,
+    backupDirectory: folder ? path.join(folder, CLOUD_BACKUP_SUBDIR) : undefined,
+    latest,
+    candidates: cloudFolderCandidates(),
+  };
+}
+
+async function writeCloudBackup(folder, backup) {
+  const directory = path.join(folder, CLOUD_BACKUP_SUBDIR);
+  await mkdir(directory, { recursive: true });
+  const serialized = JSON.stringify(backup);
+  const latestFile = path.join(directory, CLOUD_BACKUP_LATEST);
+  // Write beside the target and rename so a sync client never uploads half a file.
+  const temporaryFile = path.join(directory, `.${CLOUD_BACKUP_LATEST}.tmp`);
+  await writeFile(temporaryFile, serialized, "utf8");
+  await rename(temporaryFile, latestFile);
+  const dailyFile = path.join(directory, `tastetwin-${new Date().toISOString().slice(0, 10)}.json`);
+  await writeFile(dailyFile, serialized, "utf8");
+  const dailyFiles = (await readdir(directory)).filter((name) => /^tastetwin-\d{4}-\d{2}-\d{2}\.json$/.test(name)).sort();
+  for (const name of dailyFiles.slice(0, Math.max(0, dailyFiles.length - CLOUD_BACKUP_KEEP))) {
+    await rm(path.join(directory, name), { force: true });
+  }
+  return { ok: true, savedAt: new Date().toISOString(), bytes: Buffer.byteLength(serialized), directory };
+}
+
+function readJsonBody(req, maxBytes = 4 * 1024 * 1024) {
   return new Promise((resolve, reject) => {
     let body = "";
     let bytes = 0;
@@ -1259,7 +1538,7 @@ function readJsonBody(req) {
     req.on("data", (chunk) => {
       if (failed) return;
       bytes += Buffer.byteLength(chunk);
-      if (bytes > 4 * 1024 * 1024) {
+      if (bytes > maxBytes) {
         failed = true;
         body = "";
         reject(Object.assign(new Error("Bridge payload too large"), { statusCode: 413 }));

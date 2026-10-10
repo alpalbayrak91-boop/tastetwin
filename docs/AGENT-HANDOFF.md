@@ -60,6 +60,41 @@ Letterboxd yorum trafiğinden **konuşma geçmişi** ve **sosyal yakınlık** ç
 
 ---
 
+## Claude (bulut oturumu) — 09.10.2026 durum ve yerel ajanlara notlar
+
+Bu oturum bulutta çalıştı: Alp'in bilgisayarına, kurulu uygulamaya, Letterboxd'a ve TMDB'ye erişimi yoktu (ağ politikası `letterboxd.com` ve `api.themoviedb.org`'u engelledi). Aşağıdakiler bu yüzden **yerelde doğrulanmalı**.
+
+**GitHub durumu (09.10):** `main` ve `claude/confident-galileo-fcesl0` aynı commit'teydi (`6a2e684`, 0.5.0). GitHub'da push edilmemiş fark yoktu. Alp'in makinesindeki çalışma klasöründe commit'lenmemiş değişiklik olup olmadığını buradan göremiyorum.
+
+**Bu oturumda eklenenler (PR'da):**
+- Takipçi geçmişi: kim ne zaman takip etti / bıraktı, isim bazında, filtre ve CSV. `src/lib/follower-history.ts`, kişi geçmişi sosyal veride (`followerEvents`) tutuluyor, yedeğe giriyor.
+- Hata düzeltmesi: ağ taraması sürerken uygulama aynı sosyal sonucu 3,5 sn'de bir yeniden işliyordu; ikinci işlemde "yeni takipçi / takipten çıkan" listeleri sıfırlanıyor, sayım geçmişi kopyalarla doluyordu. Artık aynı tarama tekrar gelince hiçbir şey değişmiyor (`computeFollowerChanges`, testli).
+- Yedek artık takipçi karşılaştırma başlangıcını (`followerBaselines`) da içeriyor. localStorage boşsa (yeni bilgisayar, geri yükleme) son tam tarama başlangıç sayılıyor.
+- Kişisel bulut yedeği: Google Drive / OneDrive / iCloud / Dropbox senkron klasörüne `TasteTwin/tastetwin-latest.json` + 14 günlük kopya. Yeni kurulum, klasörle bir kez eşleşmeden otomatik yazmaz.
+
+**Yerel ajandan (Codex / Claude Desktop) istenenler — sonucu bu dosyaya yaz:**
+- [ ] `git status` ve `git log origin/main..HEAD`: Alp'in makinesinde push edilmemiş veya commit'lenmemiş iş var mı? Varsa önce o commit'lensin, sonra bu PR ile birleştirilsin.
+- [ ] `npm ci && npm test && npm run test:browser` Windows'ta geçiyor mu?
+- [ ] Google Drive for desktop kuruluysa: aday listesinde `G:\My Drive` (Türkçe Windows'ta `G:\Drive'ım`) görünüyor mu? Görünmüyorsa gerçek yolu yaz, `cloudFolderCandidates()`'a eklensin.
+- [ ] Bulut yedeği: klasör seç → dosya Drive'da görünüyor mu? İkinci bilgisayarda (ya da temizlenmiş profil) "Buluttan geri yükle" çalışıyor mu? 50 MB+ arşivde süre nasıl?
+- [ ] Gerçek hesapla iki tam tarama arasında takipçi geçmişi doğru isimleri gösteriyor mu? Ağ aşaması sürerken "Yeni takipçi" sayısı artık sıfırlanmamalı.
+- [ ] `npm run make` ile yeni kurulum paketi; kurulu uygulamada (`%APPDATA%\TasteTwin`) eski veri sorunsuz açılıyor mu?
+- [ ] Eski açık madde: eklenti hâlâ `127.0.0.1:5173`'e sabit. 5173 doluyken popup uyarısı eklendi mi?
+
+**0.6.0 eklemeleri için yerelde denenecekler:**
+- [ ] "Tüm verileri tek tuşla güncelle": eklenti kuruluyken beş adım sırayla tamamlanıyor mu? Eklenti yokken tarama adımı ~3 dk sonra "başarısız" olup diğer adımlar devam ediyor mu?
+- [ ] Gerçek arşivde puanlama v3: eşleşme detayındaki "Göreli sıralama uyumu" ve cömert/sert cümlesi mantıklı mı? Sıralama v2'ye göre beklenmedik oynadı mı?
+- [ ] GitHub Actions "Windows installer" iş akışını elle çalıştır; çıkan `TasteTwin-Setup.exe` kuruluyor mu? (Electron indirmesi runner'da `.electron-cache` olmadan yapılır.)
+- [ ] Veri çekmeyi büyütme önerisi (uygulanmadı, gerçek HTML gerekiyor): eklentiye üyelerin `/<üye>/films/ratings/page/N/` sayfalarını yavaş ve kullanıcı başlatmalı okuyan bir mod. RSS yalnız son ~50 aktiviteyi veriyor. Letterboxd koşullarını önce oku; sayfa başına bekleme ve üst sınır koy.
+
+**10.10 eklenen tam puan taraması için yerelde mutlaka doğrulanacaklar (bulut oturumu Letterboxd'a erişemedi):**
+- [ ] Eklentiyi 0.6.0'a güncelle (Load unpacked → yenile). Sosyal sekmesinde "Tam puan listeleri" → 3 kişi, 1 sayfa ile dene. Letterboxd sekmesi açılıp eklenti başlıyor mu?
+- [ ] Canlı bir `/<üye>/films/` sayfasında DevTools ile: film öğeleri `li.griditem` mi, slug `data-item-slug` mı, ad `data-item-name` "Başlık (Yıl)" mı, puan `rated-N` sınıfında mı? Değiştiyse `extension/film-grid.js` ve `tests/fixtures/letterboxd-films-*.html` güncellensin (fixture'lar gerçek sayfadan kaydedilirse en iyisi).
+- [ ] Film anahtarları RSS ile eşleşiyor mu? (Aynı kişinin RSS filmi ile kazınan filmi tek kayıt olmalı; arşivde çift görünmemeli.)
+- [ ] 50 kişi × 8 sayfa denemesinde 429 geliyor mu? Gerekirse `PAGE_DELAY_MS` artırılsın.
+
+**İnternette çalışma hakkında karar Alp'te:** Şu anki mimari yerel (Electron + yerel Node sunucusu + eklenti köprüsü `127.0.0.1`). Web'e taşımak; giriş/hesap sistemi, sunucuda kişi başı depolama ve Letterboxd isteklerinin veri merkezi IP'lerinden atılmasını gerektirir (engellenme ve kullanım koşulları riski). Önerim: yerel kalsın, çoklu cihaz için bulut klasörü yedeği kullanılsın. İleride istenirse sadece yedeği tarayıcıda açıp gösteren, sunucusuz bir "salt okunur web görüntüleyici" düşünülebilir.
+
 ## Claude → Codex soruları
 
 - [ ] `data/` altındaki kalıcı dosyaların şeması belgelenmiş mi? Konuşma verisi için ayrı dosya mı, mevcut store'a alan mı eklemeyi tercih edersin?

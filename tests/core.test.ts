@@ -3,11 +3,15 @@ import assert from "node:assert/strict";
 import JSZip from "jszip";
 import { mergeFilmArchive, preserveFilmMetadata } from "../src/lib/film-archive";
 import { readLetterboxdExport } from "../src/lib/letterboxd";
-import { buildMatches, buildMatchesAsync, buildRecommendations, scoreRatingPair } from "../src/lib/taste";
+import { buildMatches, buildMatchesAsync, buildRecommendations, rankAgreement, ratingProfile, scoreRatingPair } from "../src/lib/taste";
 import { buildFilmInsights, isWatched } from "../src/lib/film-insights";
 import type { FilmSignal, UserTaste } from "../src/types";
 import { buildWatchTogetherPicks, filterWatchTogetherPicks, togetherPickReason } from "../src/lib/watch-together";
 import { socialDirectoryCsv } from "../src/lib/social-export";
+import { archiveCsv, archiveFacet, buildNetworkRatings, defaultArchiveFilters, filterArchive, type ArchiveFilters } from "../src/lib/archive-filters";
+import { buildFilmCatalog, filmPeopleCsv, findPeopleByFilms, defaultFilmPeopleOptions, searchFilmCatalog } from "../src/lib/film-people";
+import { pickRatingsTargets, scrapedMembersToUsers } from "../src/lib/full-ratings";
+import { computeFollowerChanges, followerEventsCsv, type FollowerScan } from "../src/lib/follower-history";
 import { buildSocialDirectory, filterAndSortSocialDirectory, paginateSocialDirectory, type SocialDirectoryFilters } from "../src/lib/social-directory";
 
 function film(key: string, overrides: Partial<FilmSignal> = {}): FilmSignal {
@@ -161,4 +165,167 @@ test("social CSV exports all supplied rows, preserves Unicode and quotes spreads
   assert.match(csv, /"'=HYPERLINK/);
   assert.equal(csv.trim().split("\r\n").length, 3);
   assert.match(csv, /"Evet","Hayir","","","","",""/);
+});
+
+function followerScan(checkedAt: string, names: string[], overrides: Partial<FollowerScan> = {}): FollowerScan {
+  const followers = names.map((username) => ({ username, displayName: username.toUpperCase() }));
+  return { checkedAt, complete: true, scanStage: "social-complete", followers, counts: { following: 10, followers: followers.length, mutuals: 3 }, ...overrides };
+}
+
+test("follower history records who followed and unfollowed between complete scans", () => {
+  const first = computeFollowerChanges(followerScan("2026-10-01T10:00:00Z", ["ada", "bora"]), undefined, []);
+  assert.equal(first.changes.followerEvents.length, 0, "the first scan is only a baseline");
+  const second = computeFollowerChanges(followerScan("2026-10-05T10:00:00Z", ["bora", "cem"]), first.snapshot, first.changes.followerEvents);
+  assert.deepEqual(second.changes.newFollowers.map((m) => m.username), ["cem"]);
+  assert.deepEqual(second.changes.lostFollowers.map((m) => m.username), ["ada"]);
+  assert.deepEqual(second.changes.followerEvents.map((e) => [e.username, e.kind, e.since]), [
+    ["cem", "followed", "2026-10-01T10:00:00Z"],
+    ["ada", "unfollowed", "2026-10-01T10:00:00Z"],
+  ]);
+  const third = computeFollowerChanges(followerScan("2026-10-09T10:00:00Z", ["bora", "cem", "ada"]), second.snapshot, second.changes.followerEvents);
+  assert.equal(third.changes.followerEvents.length, 3, "a returning follower is a new event, earlier ones are kept");
+  assert.equal(third.changes.history.length, 3);
+});
+
+test("re-polling the same scan keeps new and lost followers instead of wiping them", () => {
+  const first = computeFollowerChanges(followerScan("2026-10-01T10:00:00Z", ["ada", "bora"]), undefined, []);
+  const scan = followerScan("2026-10-05T10:00:00Z", ["bora", "cem"]);
+  const second = computeFollowerChanges(scan, first.snapshot, []);
+  const repeated = computeFollowerChanges(scan, second.snapshot, second.changes.followerEvents);
+  assert.equal(repeated.snapshot, undefined, "the stored snapshot is left alone");
+  assert.deepEqual(repeated.changes.lostFollowers.map((m) => m.username), ["ada"]);
+  assert.deepEqual(repeated.changes.newFollowers.map((m) => m.username), ["cem"]);
+  assert.equal(repeated.changes.history.length, 2);
+  assert.equal(repeated.changes.followerEvents.length, 2);
+  assert.equal(repeated.changes.previousCheckedAt, "2026-10-01T10:00:00Z");
+
+  const network = computeFollowerChanges({ ...scan, checkedAt: "2026-10-05T12:00:00Z", scanStage: "network-complete", network: { candidateCount: 40 } }, second.snapshot, second.changes.followerEvents);
+  assert.deepEqual(network.changes.lostFollowers.map((m) => m.username), ["ada"]);
+  assert.equal(network.changes.history.length, 2);
+  assert.equal(network.changes.history[1].networkCandidates, 40);
+  assert.equal(second.snapshot!.history![1].networkCandidates, undefined, "the earlier snapshot is not mutated");
+});
+
+test("partial scans never become the comparison baseline", () => {
+  const first = computeFollowerChanges(followerScan("2026-10-01T10:00:00Z", ["ada", "bora"]), undefined, []);
+  const partial = computeFollowerChanges(followerScan("2026-10-02T10:00:00Z", ["ada"], { complete: false }), first.snapshot, []);
+  assert.equal(partial.snapshot, undefined);
+  assert.equal(partial.changes.lostFollowers.length, 0);
+});
+
+test("follower history CSV is newest first and neutralizes spreadsheet formulas", () => {
+  const first = computeFollowerChanges(followerScan("2026-10-01T10:00:00Z", ["ada"]), undefined, []);
+  const second = computeFollowerChanges(followerScan("2026-10-05T10:00:00Z", ["=cmd"]), first.snapshot, []);
+  const csv = followerEventsCsv(second.changes.followerEvents, "tr");
+  const lines = csv.trim().split("\r\n");
+  assert.equal(lines.length, 3);
+  assert.match(lines[1], /Takipten cikti/);
+  assert.match(lines[2], /^"'=cmd"/);
+});
+
+test("relative rank agreement treats a harsh rater who orders films the same way as a match", () => {
+  const ratings = [5, 4.5, 4.5, 4, 4, 3.5, 3.5, 3, 3, 2.5, 2, 1.5];
+  const owner = user("owner", ratings.map((rating, index) => film(`f${index}`, { rating })));
+  const harsh = user("harsh", ratings.map((rating, index) => film(`f${index}`, { rating: Math.max(0.5, rating - 1.5) })));
+  const shuffled = user("shuffled", ratings.map((_, index) => film(`f${index}`, { rating: Math.max(0.5, ratings[(index * 5) % ratings.length] - 1.5) })));
+  const [harshMatch] = buildMatches(owner, [harsh]);
+  const [shuffledMatch] = buildMatches(owner, [shuffled]);
+  assert.ok(harshMatch.relativeScore! >= 95, "same ordering on a lower scale is near-perfect rank agreement");
+  assert.ok(harshMatch.rawScore > harshMatch.absoluteScore!, "rank agreement lifts the raw affinity");
+  assert.ok(harshMatch.ratingBias! < -1.3);
+  assert.ok(shuffledMatch.relativeScore! < harshMatch.relativeScore!);
+  assert.ok(harshMatch.score > shuffledMatch.score);
+});
+
+test("relative agreement stays out of sparse comparisons and flat raters", () => {
+  const owner = user("owner", [film("a", { rating: 5 }), film("b", { rating: 3 })]);
+  assert.equal(buildMatches(owner, [user("c", [film("a", { rating: 5 }), film("b", { rating: 3 })])])[0].relativeScore, undefined);
+  assert.equal(rankAgreement([[0.2, 0.5], [0.8, 0.5]]), undefined);
+  const profile = ratingProfile(user("p", [film("x", { rating: 2 }), film("y", { rating: 4 }), film("z", { rating: 4 })]));
+  assert.equal(profile.percentile(2), 1 / 6);
+  assert.equal(profile.percentile(4), (1 + 1) / 3);
+});
+
+test("archive filters combine metadata, ranges, diary year and network ratings", () => {
+  const owner = user("owner", [
+    film("a", { rating: 4.5, year: 1999, genres: ["Drama"], directors: ["Lynch"], watchedDates: ["2025-03-01"], runtimeMinutes: 140 }),
+    film("b", { rating: 2, year: 2010, genres: ["Comedy"], watchedDates: ["2026-01-02"], runtimeMinutes: 90 }),
+    film("c", { watchlist: true, year: 2020, genres: ["Drama"] }),
+    film("d", { watched: true, year: 2001, rewatches: 1 }),
+  ]);
+  const friend = user("friend", [film("a", { rating: 2 }), film("b", { rating: 4 }), film("c", { rating: 5 })]);
+  const other = user("other", [film("c", { rating: 4 })]);
+  const network = buildNetworkRatings(owner, [owner, friend, other]);
+  assert.equal(network.get("c")?.mean, 4.5);
+  assert.equal(network.get("c")?.count, 2);
+  assert.equal(network.has("d"), false);
+  const run = (patch: Partial<ArchiveFilters>) => filterArchive(owner.films, { ...defaultArchiveFilters, ...patch }, network).map((f) => f.key);
+  assert.deepEqual(run({ genre: "Drama", sort: "title" }), ["a", "c"]);
+  assert.deepEqual(run({ minRating: 4 }), ["a"]);
+  assert.deepEqual(run({ yearFrom: 2000, yearTo: 2015, sort: "year" }), ["b", "d"]);
+  assert.deepEqual(run({ watchedYear: 2026 }), ["b"]);
+  assert.deepEqual(run({ maxRuntime: 100 }), ["b"]);
+  assert.deepEqual(run({ status: "unrated-watched" }), ["d"]);
+  assert.deepEqual(run({ status: "watchlist", minNetworkRatings: 2 }), ["c"]);
+  assert.deepEqual(run({ query: "lynch" }), ["a"]);
+  assert.deepEqual(run({ sort: "network" }).slice(0, 2), ["c", "b"]);
+  assert.deepEqual(run({ sort: "network-gap" }).slice(0, 2), ["a", "b"]);
+  assert.deepEqual(archiveFacet(owner.films, "genres"), [["Drama", 2], ["Comedy", 1]]);
+  const csv = archiveCsv(filterArchive(owner.films, { ...defaultArchiveFilters, genre: "Drama", sort: "title" }, network), network, "en").trim().split("\r\n");
+  assert.equal(csv.length, 3);
+  assert.match(csv[2], /"4.5","2"/);
+});
+
+test("scraped film pages become RSS users without replacing exports or repeating a scan", () => {
+  const owner = { ...user("owner", [film("a", { rating: 5 })]), source: "upload" as const };
+  const known = { ...user("ece", [film("a", { rating: 4 })]), id: "rss-ece", source: "rss" as const, displayName: "Ece" };
+  const scraped = [
+    { handle: "ece", scannedAt: "2026-10-10T10:00:00Z", complete: true, films: [film("a", { rating: 3.5, slug: "a" }), film("b", { rating: 2 })] },
+    { handle: "owner", scannedAt: "2026-10-10T10:00:00Z", films: [film("a", { rating: 1 })] },
+    { handle: "new", scannedAt: "2026-10-10T10:00:00Z", films: [film("c", { rating: 4 })] },
+  ];
+  const incoming = scrapedMembersToUsers(scraped, [owner, known], "owner");
+  assert.deepEqual(incoming.map((u) => u.id), ["rss-ece", "rss-new"]);
+  assert.equal(incoming[0].displayName, "Ece");
+  assert.equal(incoming[0].ratingsComplete, true);
+  const merged = mergeFilmArchive(known, incoming[0]);
+  assert.equal(merged.films.find((f) => f.key === "a")?.rating, 3.5, "the full page rating is current");
+  assert.equal(merged.ratingsScannedAt, "2026-10-10T10:00:00Z");
+  assert.equal(scrapedMembersToUsers(scraped, [owner, merged], "owner").some((u) => u.handle === "ece"), false);
+});
+
+test("ratings targets skip fresh reads and prefer never-read, higher-ranked members", () => {
+  const now = new Date().toISOString();
+  const users = [
+    { ...user("fresh", []), source: "rss" as const, ratingsScannedAt: now },
+    { ...user("old", []), source: "rss" as const, ratingsScannedAt: "2020-01-01T00:00:00Z" },
+    { ...user("me", []), source: "upload" as const },
+  ];
+  const targets = pickRatingsTargets([{ handle: "fresh", rank: 99 }, { handle: "old", rank: 90 }, { handle: "low", rank: 10 }, { handle: "high", rank: 80 }, { handle: "me", rank: 100 }, { handle: "High", rank: 1 }], users, 3);
+  assert.deepEqual(targets, ["high", "low", "old"]);
+});
+
+test("film-based people search separates lovers, haters and unknown", () => {
+  const people = [
+    user("lover", [film("a", { rating: 5 }), film("b", { rating: 4 })]),
+    user("hater", [film("a", { rating: 1 }), film("b", { rating: 2 })]),
+    user("mixed", [film("a", { rating: 4.5 }), film("b", { rating: 1.5 })]),
+    user("heart", [film("a", { liked: true, watched: true })]),
+    user("unknown", [film("z", { rating: 5 })]),
+  ];
+  const names = (criteria: Parameters<typeof findPeopleByFilms>[1], match: "all" | "any" = "all") =>
+    findPeopleByFilms(people, criteria, { ...defaultFilmPeopleOptions, match }).map((r) => r.user.handle);
+  assert.deepEqual(names([{ key: "a", condition: "loved" }]), ["lover", "mixed", "heart"]);
+  assert.deepEqual(names([{ key: "a", condition: "loved" }, { key: "b", condition: "loved" }]), ["lover"]);
+  assert.deepEqual(names([{ key: "a", condition: "loved" }, { key: "b", condition: "disliked" }]), ["mixed"]);
+  assert.deepEqual(names([{ key: "a", condition: "disliked" }, { key: "b", condition: "disliked" }], "any"), ["hater", "mixed"]);
+  assert.ok(!names([{ key: "a", condition: "disliked" }]).includes("unknown"), "missing film is not a dislike");
+  const catalog = buildFilmCatalog(people);
+  assert.equal(catalog[0].key, "a");
+  assert.equal(catalog[0].raters, 4);
+  assert.deepEqual(searchFilmCatalog(catalog, "b").map((e) => e.key), ["b"]);
+  const results = findPeopleByFilms(people, [{ key: "a", condition: "rated" }], defaultFilmPeopleOptions);
+  const csv = filmPeopleCsv(results, [{ key: "a", condition: "rated" }], new Map(catalog.map((e) => [e.key, e])), "en").trim().split("\r\n");
+  assert.equal(csv.length, 4);
+  assert.match(csv[1], /"lover".*"5"$/);
 });
