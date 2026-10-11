@@ -156,3 +156,15 @@ test("ratings scan requests reach the extension and scraped films come back as f
   const restored = await (await fetch(server.url + "/api/letterboxd/film-ratings")).json();
   assert.equal(restored.members.find((member) => member.handle === "ece")?.films.length, 2, "scraped ratings survive a restart");
 });
+
+test("an app update refreshes a stale prepared extension folder at startup", async () => {
+  const { mkdir: makeDir, readFile, writeFile } = await import("node:fs/promises");
+  const folder = path.join(server.directory, "chrome-extension");
+  await makeDir(folder, { recursive: true });
+  await writeFile(path.join(folder, "manifest.json"), JSON.stringify({ version: "0.0.1" }));
+  await server.start();
+  const bundled = JSON.parse(await readFile(path.join(root, "extension", "manifest.json"), "utf8"));
+  const prepared = JSON.parse(await readFile(path.join(folder, "manifest.json"), "utf8"));
+  assert.equal(prepared.version, bundled.version);
+  assert.ok((await readdir(folder)).includes("film-grid.js"));
+});

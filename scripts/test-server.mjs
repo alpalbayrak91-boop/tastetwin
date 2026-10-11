@@ -42,5 +42,5 @@ export async function createTestServer({ entry = "server.mjs" } = {}) {
     await rm(directory, { recursive: true, force: true });
   };
   try { await start(); } catch (error) { await dispose(); throw error; }
-  return { get url() { return url; }, start, stop, dispose };
+  return { get url() { return url; }, directory, start, stop, dispose };
 }

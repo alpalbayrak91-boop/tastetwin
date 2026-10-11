@@ -89,11 +89,29 @@ Bu oturum bulutta çalıştı: Alp'in bilgisayarına, kurulu uygulamaya, Letterb
 
 **10.10 eklenen tam puan taraması için yerelde mutlaka doğrulanacaklar (bulut oturumu Letterboxd'a erişemedi):**
 - [ ] Eklentiyi 0.6.0'a güncelle (Load unpacked → yenile). Sosyal sekmesinde "Tam puan listeleri" → 3 kişi, 1 sayfa ile dene. Letterboxd sekmesi açılıp eklenti başlıyor mu?
-- [ ] Canlı bir `/<üye>/films/` sayfasında DevTools ile: film öğeleri `li.griditem` mi, slug `data-item-slug` mı, ad `data-item-name` "Başlık (Yıl)" mı, puan `rated-N` sınıfında mı? Değiştiyse `extension/film-grid.js` ve `tests/fixtures/letterboxd-films-*.html` güncellensin (fixture'lar gerçek sayfadan kaydedilirse en iyisi).
-- [ ] Film anahtarları RSS ile eşleşiyor mu? (Aynı kişinin RSS filmi ile kazınan filmi tek kayıt olmalı; arşivde çift görünmemeli.)
-- [ ] 50 kişi × 8 sayfa denemesinde 429 geliyor mu? Gerekirse `PAGE_DELAY_MS` artırılsın.
+- [x] Canlı `/<üye>/films/` seçicileri (11.10, Claude yerel, `ricksanchez779`): ham HTML'de `li.griditem` + `data-item-slug` + `data-item-name` "Başlık (Yıl)" + `.poster-viewingdata span.rated-N` var. `film-grid.js` canlı sayfada 72/72 film, sonraki sayfa doğru. Fixture değişikliği gerekmedi.
+- [x] Film anahtarları RSS ile eşleşiyor (11.10): 13 sayfa / 906 film kazındı; RSS'teki 50 filmin 50'si aynı anahtarla bulundu, puan farkı 0.
+- [ ] 50 kişi × 8 sayfa denemesinde 429 geliyor mu? 11.10'da tek kullanıcıda 13 sayfa × 1,5 sn arayla 429 yok (hepsi 200). Büyük deneme hâlâ yapılmadı.
 
 **İnternette çalışma hakkında karar Alp'te:** Şu anki mimari yerel (Electron + yerel Node sunucusu + eklenti köprüsü `127.0.0.1`). Web'e taşımak; giriş/hesap sistemi, sunucuda kişi başı depolama ve Letterboxd isteklerinin veri merkezi IP'lerinden atılmasını gerektirir (engellenme ve kullanım koşulları riski). Önerim: yerel kalsın, çoklu cihaz için bulut klasörü yedeği kullanılsın. İleride istenirse sadece yedeği tarayıcıda açıp gösteren, sunucusuz bir "salt okunur web görüntüleyici" düşünülebilir.
+
+## 11.10 Claude (yerel) durumu ve sıradaki plan
+
+**Neden "yeniledim, değişmedi":** Kurulu uygulama `%LOCALAPPDATA%\tastetwin\app-0.1.6` (24.07 derlemesi). Uygulamada otomatik güncelleme yok, GitHub'daki son sürüm v0.1.5. Bulut işi (0.6.0) taslak PR #1'de, `main`'e birleşmemişti. GitHub Actions hesap faturalama kilidi yüzünden hiç başlamıyor (kod hatası değil).
+
+**Yapılanlar:** PR dalı yerelde `claude/bulut-0.6-yerel` olarak alındı. `npm test` (27 unit + 7 sohbet + 10 API) ve `npm run test:browser` geçti. 0.6.0 kuruldu ve çalışıyor.
+- **Dikkat:** Squirrel kurulumu `%LOCALAPPDATA%\tastetwin` klasörünü baştan yazar; içine konan `backups` klasörü (26.09 yedekleri dahil) silindi. Canlı veri `%APPDATA%\TasteTwin` altında, etkilenmedi (140 MB, önce/sonra aynı). Yedekler artık `Documents\TasteTwin-yedek\` altında. Oraya hiç yedek koyma.
+- Paket 296 MB'tan 136 MB'a indi: `forge.config.cjs` artık `.electron-cache`, `docs`, `store`, `.github` ve `tastetwin-*` ekran görüntülerini pakete almıyor.
+- Sunucu açılışta `data/chrome-extension` klasörünü paketteki sürüme günceller (`refreshPreparedExtension`). Alp'e kalan tek iş `chrome://extensions`'ta yenile düğmesi.
+
+**Plan (öncelik sırası):**
+1. Otomatik güncelleme: `update-electron-app` (update.electronjs.org, açık repo için ücretsiz) + her sürümde `gh release create vX` ile `out/make/squirrel.windows/x64` dosyalarını yükle. Böylece Alp bir daha elle kurmaz.
+2. Uygulama içinde sürüm etiketi ve "yeni sürüm var" bildirimi (sol altta `v0.6.0`).
+3. Tam puan taraması büyük deneme (50 kişi × 8 sayfa) ve 429 gözlemi; gerekirse `PAGE_DELAY_MS` 2 sn.
+4. Puanlama v3'ü gerçek arşivde Alp'in bildiği 5 kişiyle sağlama (yüksek/düşük beklenen).
+5. Gelen etkileşim akışı (`/ajax/activity-pagination/<user>/incoming/`) → "kim beni beğeniyor/yorumluyor" paneli.
+6. Testlere gerçek sayfadan kaydedilmiş fixture ekle (sadece Alp'in kendi açık profili).
+7. Actions kilidi çözülünce CI'yi yeniden çalıştır; çözülmezse yerel `npm run make` + elle release.
 
 ## Claude → Codex soruları
 

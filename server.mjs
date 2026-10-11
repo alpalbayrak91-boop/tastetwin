@@ -61,6 +61,7 @@ const PENDING_SCAN_MS = 15 * 60 * 1000;
 const PENDING_MANAGE_MS = 10 * 60 * 1000;
 
 await Promise.all([restoreBridgeCache(), restoreTmdbCache(), restoreScanState(), restoreFilmRatings()]);
+await refreshPreparedExtension();
 
 const server = createServer(async (req, res) => {
   try {
@@ -338,21 +339,7 @@ const server = createServer(async (req, res) => {
         sendJson(res, 403, { error: "app_request_required" });
         return;
       }
-      const zip = await JSZip.loadAsync(await readFile(path.join(distDir, "tastetwin-extension.zip")));
-      await mkdir(preparedExtensionDir, { recursive: true });
-      for (const entry of Object.values(zip.files)) {
-        if (entry.dir) continue;
-        const relativePath = entry.name.replace(/\\/g, "/");
-        if (!relativePath || relativePath.startsWith("/") || relativePath.split("/").includes("..")) {
-          throw new Error("Invalid extension ZIP path");
-        }
-        const destination = path.resolve(preparedExtensionDir, relativePath);
-        if (!destination.startsWith(`${path.resolve(preparedExtensionDir)}${path.sep}`)) {
-          throw new Error("Invalid extension destination");
-        }
-        await mkdir(path.dirname(destination), { recursive: true });
-        await writeFile(destination, await entry.async("nodebuffer"));
-      }
+      await extractBundledExtension();
       if (process.platform === "win32" && process.env.TASTETWIN_NO_OPEN !== "1") {
         execFile("explorer.exe", [preparedExtensionDir], () => undefined);
       }
@@ -1080,6 +1067,38 @@ function parseTitle(value) {
     title: match?.[1]?.trim() || value.replace(/\s+-\s+★.*$/, "").trim() || "Untitled",
     year: match ? number(match[2]) : undefined,
   };
+}
+
+async function extractBundledExtension() {
+  const zip = await JSZip.loadAsync(await readFile(path.join(distDir, "tastetwin-extension.zip")));
+  await mkdir(preparedExtensionDir, { recursive: true });
+  for (const entry of Object.values(zip.files)) {
+    if (entry.dir) continue;
+    const relativePath = entry.name.replace(/\\/g, "/");
+    if (!relativePath || relativePath.startsWith("/") || relativePath.split("/").includes("..")) {
+      throw new Error("Invalid extension ZIP path");
+    }
+    const destination = path.resolve(preparedExtensionDir, relativePath);
+    if (!destination.startsWith(`${path.resolve(preparedExtensionDir)}${path.sep}`)) {
+      throw new Error("Invalid extension destination");
+    }
+    await mkdir(path.dirname(destination), { recursive: true });
+    await writeFile(destination, await entry.async("nodebuffer"));
+  }
+  return zip;
+}
+
+// Chrome loads the unpacked extension from this folder, so after an app update
+// the folder must follow the bundled version; the user then only presses reload.
+async function refreshPreparedExtension() {
+  try {
+    const installed = JSON.parse(await readFile(path.join(preparedExtensionDir, "manifest.json"), "utf8"));
+    const zip = await JSZip.loadAsync(await readFile(path.join(distDir, "tastetwin-extension.zip")));
+    const bundled = JSON.parse(await zip.file("manifest.json").async("string"));
+    if (installed.version !== bundled.version) await extractBundledExtension();
+  } catch {
+    // No prepared folder yet, or no bundled ZIP (dev server): nothing to refresh.
+  }
 }
 
 function filmKey(title, year, _link) {
