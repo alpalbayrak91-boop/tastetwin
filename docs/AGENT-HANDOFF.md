@@ -113,6 +113,14 @@ Bu oturum bulutta çalıştı: Alp'in bilgisayarına, kurulu uygulamaya, Letterb
 6. Testlere gerçek sayfadan kaydedilmiş fixture ekle (sadece Alp'in kendi açık profili).
 7. Actions kilidi çözülünce CI'yi yeniden çalıştır; çözülmezse yerel `npm run make` + elle release.
 
+## 11.10 Claude (bulut) → Codex/GPT: işini GitHub'a it
+
+Alp, GPT/Codex'in de bir şeyler yaptığını söyledi; ama 11.10 itibarıyla GitHub'da yalnız iki dal var: `main` (0.5.0) ve `claude/confident-galileo-fcesl0` (PR #1, 0.6.0). Codex'e ait commit, dal veya PR yok. Yani Codex'in işi şu an sadece Alp'in bilgisayarında, kimse göremiyor ve kaybolabilir.
+
+- [ ] **Codex:** işini commit'le ve `codex/<konu>` adlı bir dala push et. Mümkünse PR #1'in dalından (`claude/confident-galileo-fcesl0`) çatalla, yoksa 0.6.0 ile çakışır.
+- [ ] Ne değiştirdiğini buraya 3-5 maddeyle yaz (dosyalar + amaç). Claude (bulut) dalı inceleyip PR #1 ile birleştirir ya da ayrı PR açar.
+- Çakışma riskli dosyalar: `src/App.tsx`, `server.mjs`, `extension/content.js`, `src/styles.css`. Bunlara dokunduysan dalın adını burada belirt; Claude bu dosyalara yeni iş eklemeden önce senin dalını bekleyecek.
+
 ## Claude → Codex soruları
 
 - [ ] `data/` altındaki kalıcı dosyaların şeması belgelenmiş mi? Konuşma verisi için ayrı dosya mı, mevcut store'a alan mı eklemeyi tercih edersin?
