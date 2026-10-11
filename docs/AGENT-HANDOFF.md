@@ -105,8 +105,8 @@ Bu oturum bulutta çalıştı: Alp'in bilgisayarına, kurulu uygulamaya, Letterb
 - Sunucu açılışta `data/chrome-extension` klasörünü paketteki sürüme günceller (`refreshPreparedExtension`). Alp'e kalan tek iş `chrome://extensions`'ta yenile düğmesi.
 
 **Plan (öncelik sırası):**
-1. Otomatik güncelleme: `update-electron-app` (update.electronjs.org, açık repo için ücretsiz) + her sürümde `gh release create vX` ile `out/make/squirrel.windows/x64` dosyalarını yükle. Böylece Alp bir daha elle kurmaz.
-2. Uygulama içinde sürüm etiketi ve "yeni sürüm var" bildirimi (sol altta `v0.6.0`).
+1. ~~Otomatik güncelleme~~ 0.6.1'de yapıldı (aşağıda).
+2. ~~Sürüm etiketi~~ pencere başlığında; güncelleme bildirimi diyalogla yapıldı.
 3. Tam puan taraması büyük deneme (50 kişi × 8 sayfa) ve 429 gözlemi; gerekirse `PAGE_DELAY_MS` 2 sn.
 4. Puanlama v3'ü gerçek arşivde Alp'in bildiği 5 kişiyle sağlama (yüksek/düşük beklenen).
 5. Gelen etkileşim akışı (`/ajax/activity-pagination/<user>/incoming/`) → "kim beni beğeniyor/yorumluyor" paneli.
@@ -120,6 +120,15 @@ Alp, GPT/Codex'in de bir şeyler yaptığını söyledi; ama 11.10 itibarıyla G
 - [ ] **Codex:** işini commit'le ve `codex/<konu>` adlı bir dala push et. Mümkünse PR #1'in dalından (`claude/confident-galileo-fcesl0`) çatalla, yoksa 0.6.0 ile çakışır.
 - [ ] Ne değiştirdiğini buraya 3-5 maddeyle yaz (dosyalar + amaç). Claude (bulut) dalı inceleyip PR #1 ile birleştirir ya da ayrı PR açar.
 - Çakışma riskli dosyalar: `src/App.tsx`, `server.mjs`, `extension/content.js`, `src/styles.css`. Bunlara dokunduysan dalın adını burada belirt; Claude bu dosyalara yeni iş eklemeden önce senin dalını bekleyecek.
+
+**Sonuç (11.10, Claude yerel kontrol etti):** Bekleyen Codex işi yok. `main`'deki `6a2e684 feat: ship TasteTwin 0.5.0` (9.10, yazar `alpess77`) Codex'in işi; Codex Alp'in git kimliğiyle push ediyor. `OneDrive\Belgeler\lb` çalışma alanı temiz, stash yok, başka worktree yok. Codex'in 9.10 sonrası oturumları başka projelerde (`opsec gizlilikli proje`, `C:\`). Bu yüzden PR #1 beklemeden birleştirildi. Codex: yeni iş yaparsan `main`'den `codex/<konu>` dalı aç.
+
+## 11.10 Claude (yerel): 0.6.1 otomatik güncelleme
+
+- `electron/main.cjs` artık Electron'un kendi `autoUpdater`'ını `https://update.electronjs.org/alpalbayrak91-boop/tastetwin` ile kullanıyor. Paket `node_modules` içermediği için `update-electron-app` paketi yerine aynı şey elle yazıldı. Açılıştan 10 sn sonra ve 4 saatte bir kontrol eder; indirince "Yeniden başlat / Sonra" sorar. Günlük: `%APPDATA%\TasteTwin\update.log`.
+- Squirrel olayları (`--squirrel-install/updated/uninstall`) işleniyor: Başlat menüsü ve masaüstü kısayolu oluşuyor. Önceden hiç kısayol yoktu.
+- Pencere başlığı sürümü gösterir (`TasteTwin 0.6.1`).
+- **Sürüm çıkarma:** `package.json` sürümünü artır → `npm test` → `npm run make` → `gh release create vX.Y.Z out/make/squirrel.windows/x64/*` (RELEASES + nupkg + Setup). Taslak veya ön sürüm olmamalı, yoksa güncelleme servisi görmez.
 
 ## Claude → Codex soruları
 
