@@ -4,6 +4,8 @@ TasteTwin is a local-first Letterboxd social graph and movie taste matching app.
 
 ## What it does
 
+- **Refresh all data in one click:** your recent films, the social and two-hop network scan, every member's film activity, TMDB metadata and the cloud backup run in order, with a live step list that explains each step.
+
 - Imports a member's full Letterboxd export ZIP or CSV.
 - Reads following and follower lists through the companion Chrome extension.
 - Finds mutuals, non-followers, new followers, and lost followers.
@@ -22,12 +24,19 @@ TasteTwin is a local-first Letterboxd social graph and movie taste matching app.
 - Uses a separate validity percentage based on the number of co-rated films.
 - Shows total viewing time, average rating, viewing rhythm, and top genres, directors, actors, and languages.
 - Shows longest diary streaks, busiest month, distinct viewing days, rewatch rate, average runtime and the complete diary span.
-- Browses the complete film archive with search, watched/rated/loved/watchlist filters, sorting and 50-row pagination.
+- Browses the complete film archive with search (title, year, director, cast), status filters (watched, rated, loved, watchlist, watched-but-unrated, rewatched, reviewed), genre, director, country, language, rating range, release-year range, year watched, maximum runtime and minimum network ratings; sorts by network favourite, distance from the network, TMDB rating and more; exports the filtered list as CSV.
+- **Full rating lists:** the extension can read selected members' public Letterboxd film pages (72 films per page, 1.4 s between pages, backs off on 429) so matching uses every public rating instead of RSS's last ~50 entries. Scope: best matches, mutuals, following, followers or the whole directory; members read in the last 30 days are skipped; each finished member is saved immediately and survives restarts.
+- **Find people by film:** pick up to 12 films, set a condition for each (loved, adored, disliked, hated, hearted, rated, watched), require all or any, and get everyone loaded into TasteTwin who matches, with their ratings, follow status, taste score and CSV export. A member who never logged a film is never counted as disliking it.
+- Shows a "network mean" for each film: the average rating from everyone loaded into TasteTwin, with the individual raters on hover.
 - Picks a taste-based, short, or random next watch from unwatched watchlist entries with a synopsis and reason.
 - Keeps imported and scanned data on the user's computer.
 - Exports and restores a portable local JSON backup containing film, social, history and management-list data without exposing the TMDB token.
+- Keeps a name-level follower history (who started following or unfollowed, between which two scans), with filtering and CSV export.
+- Optionally writes that backup automatically to a personal cloud sync folder (Google Drive, OneDrive, iCloud Drive or Dropbox desktop apps) and restores it on another computer.
 
 ## Install on Windows
+
+Pushing a `v*` tag builds `TasteTwin-Setup.exe` and the extension ZIP on GitHub Actions and attaches them to a GitHub Release; the "Windows installer" workflow can also be run by hand to get them as a build artifact.
 
 1. Download `TasteTwin-Setup.exe` from the latest GitHub Release.
 2. Install and open TasteTwin.
@@ -44,7 +53,7 @@ TasteTwin is a local-first Letterboxd social graph and movie taste matching app.
 
 Network candidates are ranked by weighted shared connectors. Selective connectors count more than accounts following a very broad set of people, while daily connector shuffling gives successive scans some discovery diversity. RSS matching is processed in small batches and the result count is user-controlled.
 
-The displayed taste score uses only films rated by both people. Rating gaps of 0-1 are positive, 1.5 is neutral, and gaps of 2 or more become increasingly negative. Sentiment context matters: a 2/4 split is penalized more than 0.5/2.5, repeated splits add an extra penalty, and locally rare or divisive films can carry more weight. Sparse comparisons are pulled toward a neutral score of 50 and shown with a separate validity percentage.
+The displayed taste score uses only films rated by both people. Since 0.6 it blends two models: the star-gap model below and a Criticker-style relative rank agreement, which compares where each film sits within each person's own ratings, so a harsh and a generous rater who order films the same way still match. The relative part needs 4 common films and 8 ratings per person and contributes up to 30% as evidence grows. The match dialog shows both parts, validity and how generously the other person rates. Rating gaps of 0-1 are positive, 1.5 is neutral, and gaps of 2 or more become increasingly negative. Sentiment context matters: a 2/4 split is penalized more than 0.5/2.5, repeated splits add an extra penalty, and locally rare or divisive films can carry more weight. Sparse comparisons are pulled toward a neutral score of 50 and shown with a separate validity percentage.
 
 The current scoring model, social-data limits, TMDB recommendation plan, and known gaps are recorded in [docs/PRODUCT-NOTES.md](docs/PRODUCT-NOTES.md).
 
@@ -79,6 +88,9 @@ npx playwright install chromium --only-shell
 npm run test:browser
 ```
 
+If Playwright's own browser is unavailable, set `TASTETWIN_CHROMIUM_PATH` to a
+Chromium executable for `test:browser` and `test:storage`.
+
 `npm test` checks imports, scoring, recommendations, social export, API access
 rules, Vite forwarding and bridge persistence. `test:browser` builds the app
 and desktop server, then checks import/reload, backups, social pagination,
@@ -104,6 +116,31 @@ npm run make
 ```
 
 The installer is written to `out/make/squirrel.windows/x64/TasteTwin-Setup.exe`.
+
+## Personal cloud backup
+
+TasteTwin does not run its own cloud. Under **Backup and transfer**, choose the
+folder that a desktop sync app already uploads (for example `G:\My Drive` for
+Google Drive or `%USERPROFILE%\OneDrive`). Detected sync folders appear as
+shortcuts. TasteTwin writes `TasteTwin/tastetwin-latest.json` plus one dated
+copy per day (the last 14 are kept); the sync app uploads them. No cloud
+password or token passes through TasteTwin.
+
+Automatic backups run a minute after changes settle, but only after this
+computer has synced with the folder once (**Back up now** or **Restore from
+cloud**). A fresh install therefore never overwrites another computer's backup
+with empty data. Only the TasteTwin window can call the backup endpoints;
+installed browser extensions are refused.
+
+## Follower history
+
+Each complete social scan is compared with the previous complete scan. Every
+follow and unfollow is recorded by name with the scan that detected it and the
+previous scan, so the real moment is known to lie between those two times.
+Partial scans never become the comparison baseline, and repeated delivery of the
+same scan while the network stage runs no longer clears the new/lost lists.
+The history is stored with the social data, included in backups and exported
+from **Follower history → CSV**.
 
 ## Data limits
 

@@ -29,13 +29,36 @@ import {
   Users,
   X,
 } from "lucide-react";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { t } from "./i18n";
 import { version as appVersion } from "../package.json";
 import { version as extensionVersion } from "../extension/manifest.json";
 import { WatchTogetherPanel } from "./components/WatchTogetherPanel";
 import { socialDirectoryCsv } from "./lib/social-export";
+import { pickRatingsTargets, scrapedMembersToUsers, type RatingsScope, type ScrapedMember } from "./lib/full-ratings";
+import {
+  buildFilmCatalog,
+  defaultFilmPeopleOptions,
+  filmPeopleCsv,
+  findPeopleByFilms,
+  searchFilmCatalog,
+  type FilmCondition,
+  type FilmCriterion,
+  type FilmPeopleOptions,
+} from "./lib/film-people";
+import { computeFollowerChanges, followerEventsCsv, summarizeFollowerEvents, type FollowerEvent, type FollowerSnapshot } from "./lib/follower-history";
 import { togetherPickReason } from "./lib/watch-together";
+import {
+  archiveCsv,
+  archiveFacet,
+  buildNetworkRatings,
+  defaultArchiveFilters,
+  filterArchive,
+  watchedYears,
+  type ArchiveFilters,
+  type ArchiveSort,
+  type ArchiveStatus,
+} from "./lib/archive-filters";
 import { readLetterboxdExport } from "./lib/letterboxd";
 import { mergeFilmArchive, preserveFilmMetadata } from "./lib/film-archive";
 import {
@@ -113,6 +136,8 @@ type SocialData =
       fans: SocialMember[];
       lostFollowers: SocialMember[];
       newFollowers: SocialMember[];
+      /** Name-level follower changes across every complete scan, newest last. */
+      followerEvents?: FollowerEvent[];
       network?: {
         nodes: number;
         edges: number;
@@ -139,7 +164,28 @@ type TasteTwinBackup = {
   appVersion: string;
   exportedAt: string;
   state: PersistentAppState;
+  /** Follower comparison baselines; optional so pre-0.6 backups still restore. */
+  followerBaselines?: Record<string, unknown>;
 };
+
+type FullRefreshStep = {
+  id: "own" | "scan" | "activity" | "ratings" | "tmdb" | "backup";
+  state: "pending" | "running" | "done" | "failed" | "skipped";
+};
+
+type CloudBackupStatus = {
+  folder?: string;
+  folderAvailable: boolean;
+  backupDirectory?: string;
+  latest?: { savedAt: string; bytes: number };
+  candidates: Array<{ provider: string; folder: string }>;
+};
+
+const FOLLOWER_BASELINE_PREFIX = "tastetwin.followers.";
+const CLOUD_BACKUP_DELAY_MS = 60 * 1000;
+const FULL_REFRESH_RATINGS_MEMBERS = 40;
+const FULL_REFRESH_RATINGS_PAGES = 6;
+const appRequestHeaders = { "Content-Type": "application/json", "X-TasteTwin-Request": "app" };
 
 const PERSISTENT_STATE_KEY = "app";
 
@@ -191,6 +237,22 @@ export default function App() {
   const [socialLoading, setSocialLoading] = useState(false);
   const [socialByHandle, setSocialByHandle] = useState<Record<string, SocialData>>(loadStoredSocial);
   const [managementQueuesByHandle, setManagementQueuesByHandle] = useState<Record<string, SocialManagementQueues>>({});
+  const [cloudBackup, setCloudBackup] = useState<CloudBackupStatus>();
+  const [cloudFolderInput, setCloudFolderInput] = useState("");
+  const [cloudBusy, setCloudBusy] = useState(false);
+  const [cloudAuto, setCloudAuto] = useState(() => localStorage.getItem("tastetwin.cloudAuto") !== "off");
+  // Folder this computer has already synced with. Until then automatic backups
+  // stay off, so a fresh install never overwrites another computer's backup.
+  const [cloudLinked, setCloudLinked] = useState(() => localStorage.getItem("tastetwin.cloudLinked") ?? "");
+  const [fullRefresh, setFullRefresh] = useState<{ running: boolean; steps: FullRefreshStep[]; startedAt: number }>();
+  const [fullRefreshBackupRequest, setFullRefreshBackupRequest] = useState(0);
+  const [ratingsScan, setRatingsScan] = useState<{ running: boolean; text: string; members: number; loaded: number }>();
+  const socialByHandleRef = useRef(socialByHandle);
+  socialByHandleRef.current = socialByHandle;
+  const usersRef = useRef(users);
+  usersRef.current = users;
+  const matchesRef = useRef(matches);
+  matchesRef.current = matches;
   const [copied, setCopied] = useState(false);
   const [preparedExtensionPath, setPreparedExtensionPath] = useState("");
   const [tmdbToken, setTmdbToken] = useState(() => localStorage.getItem("tastetwin.tmdbToken") ?? "");
@@ -429,7 +491,7 @@ export default function App() {
       if (event.origin !== "https://letterboxd.com" || event.data?.type !== "TASTETWIN_SOCIAL") return;
       const payload = socialFromBrowserMessage(event.data);
       if (!payload) return;
-      const enriched = addFollowerChanges(payload.handle, payload);
+      const enriched = addFollowerChanges(payload.handle, payload, socialByHandleRef.current[payload.handle]);
       setAccountHandle(payload.handle);
       setSocialByHandle((current) => ({ ...current, [payload.handle]: enriched }));
       setTab("social");
@@ -545,8 +607,18 @@ export default function App() {
     }
   }
 
-  function exportLocalBackup() {
-    const backup: TasteTwinBackup = {
+  function buildBackup(): TasteTwinBackup {
+    const followerBaselines: Record<string, unknown> = {};
+    for (let index = 0; index < localStorage.length; index += 1) {
+      const key = localStorage.key(index);
+      if (!key?.startsWith(FOLLOWER_BASELINE_PREFIX)) continue;
+      try {
+        followerBaselines[key.slice(FOLLOWER_BASELINE_PREFIX.length)] = JSON.parse(localStorage.getItem(key) ?? "null");
+      } catch {
+        // A damaged baseline is rebuilt from the saved social scan.
+      }
+    }
+    return {
       format: "tastetwin-backup",
       schemaVersion: 1,
       appVersion,
@@ -558,7 +630,12 @@ export default function App() {
         socialByHandle,
         managementQueuesByHandle,
       },
+      followerBaselines,
     };
+  }
+
+  function exportLocalBackup() {
+    const backup = buildBackup();
     const blob = new Blob([JSON.stringify(backup)], { type: "application/json" });
     const url = URL.createObjectURL(blob);
     const link = document.createElement("a");
@@ -577,39 +654,7 @@ export default function App() {
     if (!file || !storageReady) return;
     try {
       if (file.size > 250 * 1024 * 1024) throw new Error("backup_too_large");
-      const backup = JSON.parse(await file.text()) as Partial<TasteTwinBackup>;
-      const state = backup.state;
-      if (
-        backup.format !== "tastetwin-backup" ||
-        backup.schemaVersion !== 1 ||
-        !state ||
-        !Array.isArray(state.users) ||
-        typeof state.socialByHandle !== "object"
-      ) {
-        throw new Error("invalid_backup");
-      }
-      const restoredUsers = state.users.map(deriveUserActivity);
-      const restoredActiveId = typeof state.activeId === "string" && restoredUsers.some((user) => user.id === state.activeId)
-        ? state.activeId : restoredUsers[0]?.id ?? "";
-      const restoredHandle = typeof state.accountHandle === "string" ? state.accountHandle : "";
-      await savePersistentState<PersistentAppState>(PERSISTENT_STATE_KEY, {
-        users: restoredUsers,
-        activeId: restoredActiveId,
-        accountHandle: restoredHandle,
-        socialByHandle: state.socialByHandle ?? {},
-        managementQueuesByHandle: state.managementQueuesByHandle ?? {},
-      });
-      setUsers(restoredUsers);
-      setActiveId(restoredActiveId);
-      setAccountHandle(restoredHandle);
-      setSocialByHandle(state.socialByHandle ?? {});
-      setManagementQueuesByHandle(state.managementQueuesByHandle ?? {});
-      setTab("overview");
-      setStatus(
-        language === "tr"
-          ? `Yedek geri yuklendi: ${restoredUsers.length} profil. Veriler bu bilgisayardaki uygulama deposuna kaydedildi.`
-          : `Backup restored: ${restoredUsers.length} profiles. Data has been saved to this computer's app storage.`,
-      );
+      await restoreBackup(JSON.parse(await file.text()) as Partial<TasteTwinBackup>);
     } catch {
       setStatus(
         language === "tr"
@@ -618,6 +663,149 @@ export default function App() {
       );
     }
   }
+
+  async function restoreBackup(backup: Partial<TasteTwinBackup>) {
+    const state = backup.state;
+    if (
+      backup.format !== "tastetwin-backup" ||
+      backup.schemaVersion !== 1 ||
+      !state ||
+      !Array.isArray(state.users) ||
+      typeof state.socialByHandle !== "object"
+    ) {
+      throw new Error("invalid_backup");
+    }
+    const restoredUsers = state.users.map(deriveUserActivity);
+    const restoredActiveId = typeof state.activeId === "string" && restoredUsers.some((user) => user.id === state.activeId)
+      ? state.activeId : restoredUsers[0]?.id ?? "";
+    const restoredHandle = typeof state.accountHandle === "string" ? state.accountHandle : "";
+    await savePersistentState<PersistentAppState>(PERSISTENT_STATE_KEY, {
+      users: restoredUsers,
+      activeId: restoredActiveId,
+      accountHandle: restoredHandle,
+      socialByHandle: state.socialByHandle ?? {},
+      managementQueuesByHandle: state.managementQueuesByHandle ?? {},
+    });
+    setUsers(restoredUsers);
+    setActiveId(restoredActiveId);
+    setAccountHandle(restoredHandle);
+    setSocialByHandle(state.socialByHandle ?? {});
+    setManagementQueuesByHandle(state.managementQueuesByHandle ?? {});
+    if (backup.followerBaselines && typeof backup.followerBaselines === "object") {
+      for (const [handle, baseline] of Object.entries(backup.followerBaselines)) {
+        if (/^[a-z0-9_-]{1,32}$/.test(handle) && baseline && typeof baseline === "object") {
+          localStorage.setItem(`${FOLLOWER_BASELINE_PREFIX}${handle}`, JSON.stringify(baseline));
+        }
+      }
+    }
+    setTab("overview");
+    setStatus(
+      language === "tr"
+        ? `Yedek geri yuklendi: ${restoredUsers.length} profil. Veriler bu bilgisayardaki uygulama deposuna kaydedildi.`
+        : `Backup restored: ${restoredUsers.length} profiles. Data has been saved to this computer's app storage.`,
+    );
+  }
+
+  useEffect(() => {
+    fetch("/api/system/cloud-backup", { headers: appRequestHeaders })
+      .then((response) => (response.ok ? response.json() : undefined))
+      .then((status: CloudBackupStatus | undefined) => {
+        if (!status) return;
+        setCloudBackup(status);
+        setCloudFolderInput(status.folder ?? status.candidates[0]?.folder ?? "");
+      })
+      .catch(() => undefined);
+  }, []);
+
+  async function saveCloudFolder(folder: string) {
+    setCloudBusy(true);
+    try {
+      const response = await fetch("/api/system/cloud-backup/config", { method: "POST", headers: appRequestHeaders, body: JSON.stringify({ folder }) });
+      const payload = await response.json();
+      if (!response.ok) throw new Error(payload.error);
+      setCloudBackup(payload);
+      setStatus(
+        folder
+          ? language === "tr"
+            ? `Bulut yedek klasoru ayarlandi: ${payload.backupDirectory}. Senkron uygulaman (Google Drive, OneDrive...) bu klasoru buluta yukler.`
+            : `Cloud backup folder set: ${payload.backupDirectory}. Your sync app (Google Drive, OneDrive...) uploads it.`
+          : language === "tr" ? "Bulut yedegi kapatildi." : "Cloud backup turned off.",
+      );
+      if (folder && !payload.latest) {
+        await backupToCloud(true, payload.folder);
+      } else if (folder) {
+        setStatus(
+          language === "tr"
+            ? `Bu klasorde ${new Date(payload.latest.savedAt).toLocaleString("tr-TR")} tarihli bir yedek var. Baska bilgisayardan geliyorsa "Buluttan geri yukle", bu bilgisayardaki veri daha yeniyse "Simdi yedekle" sec.`
+            : `This folder already has a backup from ${new Date(payload.latest.savedAt).toLocaleString("en-US")}. Use "Restore from cloud" if it came from another computer, or "Back up now" if this computer's data is newer.`,
+        );
+      }
+    } catch (error) {
+      const code = error instanceof Error ? error.message : "";
+      setStatus(
+        language === "tr"
+          ? code === "folder_not_found" ? "Bu klasor bulunamadi. Tam yolu yaz (or. G:\\My Drive)." : "Klasor kaydedilemedi; tam yol yazmalisin."
+          : code === "folder_not_found" ? "Folder not found. Enter the full path (e.g. G:\\My Drive)." : "Folder could not be saved; enter a full path.",
+      );
+    } finally {
+      setCloudBusy(false);
+    }
+  }
+
+  async function backupToCloud(quiet = false, folder = cloudBackup?.folder) {
+    try {
+      const response = await fetch("/api/system/cloud-backup", { method: "POST", headers: appRequestHeaders, body: JSON.stringify(buildBackup()) });
+      const payload = await response.json();
+      if (!response.ok) throw new Error(payload.error);
+      setCloudBackup((current) => current && { ...current, latest: { savedAt: payload.savedAt, bytes: payload.bytes } });
+      markCloudLinked(folder);
+      if (!quiet) {
+        setStatus(language === "tr" ? `Bulut klasorune yedeklendi: ${payload.directory}` : `Backed up to the cloud folder: ${payload.directory}`);
+      }
+    } catch {
+      setStatus(
+        language === "tr"
+          ? "Bulut klasorune yedek yazilamadi. Klasor hala var mi, disk dolu mu kontrol et."
+          : "Could not write the cloud-folder backup. Check that the folder still exists and has space.",
+      );
+    }
+  }
+
+  async function restoreFromCloud() {
+    const confirmed = window.confirm(
+      language === "tr"
+        ? "Bulut klasorundeki son yedek bu bilgisayardaki TasteTwin verisinin yerine gecsin mi?"
+        : "Replace this computer's TasteTwin data with the latest backup from the cloud folder?",
+    );
+    if (!confirmed) return;
+    setCloudBusy(true);
+    try {
+      const response = await fetch("/api/system/cloud-backup/latest", { headers: appRequestHeaders });
+      if (!response.ok) throw new Error("backup_not_found");
+      await restoreBackup(await response.json());
+      markCloudLinked(cloudBackup?.folder);
+    } catch {
+      setStatus(language === "tr" ? "Bulut klasorunde gecerli bir TasteTwin yedegi bulunamadi." : "No valid TasteTwin backup found in the cloud folder.");
+    } finally {
+      setCloudBusy(false);
+    }
+  }
+
+  useEffect(() => {
+    if (fullRefreshBackupRequest) void backupToCloud(true);
+  }, [fullRefreshBackupRequest]);
+
+  function markCloudLinked(folder = "") {
+    localStorage.setItem("tastetwin.cloudLinked", folder);
+    setCloudLinked(folder);
+  }
+
+  // Back up after changes settle, so a long scan writes once instead of every few seconds.
+  useEffect(() => {
+    if (!storageReady || !cloudAuto || !cloudBackup?.folder || cloudLinked !== cloudBackup.folder || !users.length) return;
+    const timer = window.setTimeout(() => void backupToCloud(true), CLOUD_BACKUP_DELAY_MS);
+    return () => window.clearTimeout(timer);
+  }, [users, socialByHandle, managementQueuesByHandle, storageReady, cloudAuto, cloudBackup?.folder, cloudLinked]);
 
   async function fetchSocialData(source: "extension" | "public" = "extension") {
     const handle = (accountHandle || activeUser?.handle || "").trim().replace(/^@/, "").toLowerCase();
@@ -635,7 +823,7 @@ export default function App() {
         const errorCode = "error" in payload ? payload.error : "social_fetch_failed";
         throw new Error(errorCode);
       }
-      const enriched = addFollowerChanges(handle, payload);
+      const enriched = addFollowerChanges(handle, payload, socialByHandleRef.current[handle]);
       setSocialByHandle((current) => {
         const existing = current[handle];
         if (
@@ -692,11 +880,11 @@ export default function App() {
     }
   }
 
-  async function openLetterboxdAndScan(resume = false) {
+  async function openLetterboxdAndScan(resume = false): Promise<boolean> {
     const handle = (accountHandle || activeUser?.handle || "").trim().replace(/^@/, "").toLowerCase();
     if (!/^[a-z0-9_-]{2,32}$/.test(handle)) {
       setStatus(language === "tr" ? "Once Letterboxd kullanici adini yaz." : "Enter your Letterboxd handle first.");
-      return;
+      return false;
     }
     setAccountHandle(handle);
     setStatus(
@@ -717,17 +905,152 @@ export default function App() {
       const payload = await response.json().catch(() => ({}));
       if (!response.ok) throw new Error(payload.error ?? "scan_request_failed");
       window.open(`https://letterboxd.com/${encodeURIComponent(handle)}/`, "_blank", "noopener,noreferrer");
-      void waitForRequestedScan(handle, payload.requestedAt);
+      return await waitForRequestedScan(handle, payload.requestedAt);
     } catch (error) {
       console.error(error);
       setStatus(language === "tr" ? "Otomatik tarama emri verilemedi." : "Could not request automatic scanning.");
+      return false;
     }
+  }
+
+  /** Merge member film pages the extension saved into the local archive. */
+  async function loadScrapedRatings(since?: string) {
+    try {
+      const query = since ? `?since=${encodeURIComponent(since)}` : "";
+      const response = await fetch(`/api/letterboxd/film-ratings${query}`);
+      if (!response.ok) return 0;
+      const payload = (await response.json()) as { members?: ScrapedMember[] };
+      const incoming = scrapedMembersToUsers(payload.members ?? [], usersRef.current, accountHandle || activeUser?.handle || "");
+      if (incoming.length) setUsers((current) => mergeRssUsers(current, incoming));
+      return incoming.length;
+    } catch {
+      return 0;
+    }
+  }
+
+  function ratingsTargetsFor(scope: RatingsScope, limit: number) {
+    const handle = (accountHandle || activeUser?.handle || "").toLowerCase();
+    const social = socialByHandleRef.current[handle];
+    const members = social?.available
+      ? scope === "following" ? social.following
+        : scope === "mutuals" ? social.mutuals
+          : scope === "followers" ? social.followers
+            : scope === "directory" ? [...social.following, ...social.followers, ...(social.networkCandidates ?? [])]
+              : []
+      : [];
+    const candidates = scope === "matches"
+      ? [...matchesRef.current].sort((a, b) => b.recommendationScore - a.recommendationScore)
+        .map((match, index, list) => ({ handle: match.user.handle, rank: list.length - index }))
+      : members.map((member, index) => ({ handle: member.username, rank: members.length - index }));
+    return pickRatingsTargets(candidates.filter((candidate) => candidate.handle.toLowerCase() !== handle), usersRef.current, limit);
+  }
+
+  // Opens your Letterboxd profile; the extension claims the request there and
+  // reads each member's film pages. Finished members are merged as they arrive.
+  async function requestRatingsScan(handles: string[], maxPages: number): Promise<boolean> {
+    const owner = (accountHandle || activeUser?.handle || "").trim().replace(/^@/, "").toLowerCase();
+    if (!/^[a-z0-9_-]{2,32}$/.test(owner) || !handles.length) return false;
+    const tr = language === "tr";
+    setRatingsScan({ running: true, text: tr ? "Letterboxd aciliyor; eklenti puan sayfalarini okuyacak." : "Opening Letterboxd; the extension will read rating pages.", members: handles.length, loaded: 0 });
+    try {
+      const response = await fetch("/api/extension/request-ratings", {
+        method: "POST",
+        headers: appRequestHeaders,
+        body: JSON.stringify({ handle: owner, handles, maxPages }),
+      });
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(payload.error ?? "ratings_request_failed");
+      window.open(`https://letterboxd.com/${encodeURIComponent(owner)}/`, "_blank", "noopener,noreferrer");
+      const requestedAt = payload.requestedAt as string;
+      const startupDeadline = Date.now() + 3 * 60 * 1000;
+      let sawLive = false;
+      let loaded = 0;
+      while (true) {
+        await new Promise((resolve) => window.setTimeout(resolve, 5000));
+        loaded += await loadScrapedRatings(requestedAt);
+        const progress = await readScanProgress(owner);
+        const current = progress?.mode === "ratings" && Date.parse(progress.updatedAt ?? "") >= Date.parse(requestedAt) ? progress : undefined;
+        if (current?.live) sawLive = true;
+        setRatingsScan({ running: true, text: current?.text ?? (tr ? "Eklentinin baslamasi bekleniyor..." : "Waiting for the extension..."), members: handles.length, loaded });
+        if (current?.state === "complete") {
+          loaded += await loadScrapedRatings(requestedAt);
+          setRatingsScan({ running: false, text: current.text ?? "", members: handles.length, loaded });
+          return true;
+        }
+        if (current && ["error", "cancelled", "interrupted"].includes(current.state) || (sawLive && current?.stalled)) {
+          setRatingsScan({ running: false, text: `${current?.text ?? ""} ${current?.hint ?? ""}`.trim(), members: handles.length, loaded });
+          return false;
+        }
+        if (!sawLive && Date.now() > startupDeadline) {
+          setRatingsScan({ running: false, text: tr ? "Eklenti baslamadi. Eklentiyi 0.6.0'a guncelle ve Letterboxd sekmesini yenile." : "The extension did not start. Update it to 0.6.0 and refresh the Letterboxd tab.", members: handles.length, loaded });
+          return false;
+        }
+      }
+    } catch (error) {
+      console.error(error);
+      setRatingsScan({ running: false, text: tr ? "Puan taramasi istenemedi." : "Could not request the ratings scan.", members: handles.length, loaded: 0 });
+      return false;
+    }
+  }
+
+  useEffect(() => {
+    if (storageReady) void loadScrapedRatings();
+  }, [storageReady]);
+
+  // One button for everything TasteTwin can collect. Each step is independent:
+  // a failed scan still lets the remaining steps refresh what is already known.
+  async function runFullRefresh() {
+    if (fullRefresh?.running) return;
+    const steps: FullRefreshStep[] = [
+      { id: "own", state: "pending" },
+      { id: "scan", state: "pending" },
+      { id: "activity", state: "pending" },
+      { id: "ratings", state: "pending" },
+      { id: "tmdb", state: tmdbToken.trim() ? "pending" : "skipped" },
+      { id: "backup", state: cloudBackup?.folder ? "pending" : "skipped" },
+    ];
+    const update = (id: FullRefreshStep["id"], state: FullRefreshStep["state"]) => {
+      const index = steps.findIndex((step) => step.id === id);
+      steps[index] = { ...steps[index], state };
+      setFullRefresh({ running: true, steps: [...steps], startedAt: Date.now() });
+    };
+    setFullRefresh({ running: true, steps: [...steps], startedAt: Date.now() });
+    update("own", "running");
+    await refreshOwnActivity();
+    update("own", "done");
+    update("scan", "running");
+    update("scan", (await openLetterboxdAndScan(false)) ? "done" : "failed");
+    update("activity", "running");
+    await useNetworkAsMatchCandidates();
+    update("activity", "done");
+    // Matches are recalculated after the activity step; give that a moment.
+    await new Promise((resolve) => window.setTimeout(resolve, 3000));
+    const ratingsTargets = ratingsTargetsFor("matches", FULL_REFRESH_RATINGS_MEMBERS);
+    if (ratingsTargets.length) {
+      update("ratings", "running");
+      update("ratings", (await requestRatingsScan(ratingsTargets, FULL_REFRESH_RATINGS_PAGES)) ? "done" : "failed");
+    } else {
+      update("ratings", "skipped");
+    }
+    if (steps.find((step) => step.id === "tmdb")?.state === "pending") {
+      update("tmdb", "running");
+      await enrichWithTmdb();
+      update("tmdb", "done");
+    }
+    if (steps.find((step) => step.id === "backup")?.state === "pending") {
+      update("backup", "running");
+      // Wait a moment so the last state updates are in the backup.
+      await new Promise((resolve) => window.setTimeout(resolve, 1500));
+      setFullRefreshBackupRequest(Date.now());
+      update("backup", "done");
+    }
+    setFullRefresh({ running: false, steps: [...steps], startedAt: Date.now() });
   }
 
   // A full network scan can run for hours, so this loop never times out on a
   // clock alone. It stops when the extension reports failure, or when the
   // extension stops heartbeating (the tab died) with no progress at all.
-  async function waitForRequestedScan(handle: string, requestedAt: string) {
+  async function waitForRequestedScan(handle: string, requestedAt: string): Promise<boolean> {
     const startupDeadline = Date.now() + 3 * 60 * 1000;
     let socialReceived = false;
     let sawLiveScan = false;
@@ -742,11 +1065,11 @@ export default function App() {
             ? `Tarama durdu: ${scan.text ?? "sebep bilinmiyor"}${scan.hint ? ` ${scan.hint}` : ""}`
             : `Scan stopped: ${scan.text ?? "unknown reason"}${scan.hint ? ` ${scan.hint}` : ""}`,
         );
-        return;
+        return false;
       }
       if (scan?.state === "cancelled") {
         setStatus(language === "tr" ? "Tarama iptal edildi." : "Scan cancelled.");
-        return;
+        return false;
       }
       if (!sawLiveScan && Date.now() > startupDeadline) {
         setStatus(
@@ -754,7 +1077,7 @@ export default function App() {
             ? "Eklenti taramayi baslatmadi. Letterboxd sekmesini yenile ve eklenti penceresinden baslat."
             : "The extension never started. Refresh the Letterboxd tab and start it from the extension popup.",
         );
-        return;
+        return false;
       }
 
       try {
@@ -762,7 +1085,7 @@ export default function App() {
         if (!response.ok) continue;
         const payload = (await response.json()) as SocialData;
         if (!payload.available || Date.parse(payload.checkedAt) < Date.parse(requestedAt)) continue;
-        const enriched = addFollowerChanges(handle, payload);
+        const enriched = addFollowerChanges(handle, payload, socialByHandleRef.current[handle]);
         setSocialByHandle((current) => ({ ...current, [handle]: enriched }));
         setTab("social");
         if (!socialReceived) {
@@ -779,7 +1102,7 @@ export default function App() {
               ? `Tarama tamamlandi: ${enriched.counts.following} takip, ${enriched.counts.followers} takipci, ${enriched.network.candidateCount ?? 0} ag adayi.`
               : `Scan complete: ${enriched.counts.following} following, ${enriched.counts.followers} followers, ${enriched.network.candidateCount ?? 0} network candidates.`,
           );
-          return;
+          return true;
         }
       } catch {
         // The extension may still be scanning.
@@ -815,9 +1138,10 @@ export default function App() {
     if (!handle) return;
     setLoading(true);
     setStatus("");
+    const handles: string[] = [];
+    const members: SocialMember[] = [];
+    let networkAvailable = true;
     try {
-      const handles: string[] = [];
-      const members: SocialMember[] = [];
       let offset = 0;
       let total = 0;
       do {
@@ -832,22 +1156,26 @@ export default function App() {
         offset = payload.nextOffset ?? total;
         setStatus(language === "tr" ? `Ag listesi aliniyor: ${handles.length}/${total}` : `Loading network list: ${handles.length}/${total}`);
       } while (offset < total && (networkCandidateLimit === 0 || handles.length < networkCandidateLimit));
-      const directMembers = socialByHandle[handle]?.available
-        ? [...socialByHandle[handle].following, ...socialByHandle[handle].followers]
-        : [];
-      const directHandles = [...new Set(directMembers.map((member) => member.username.toLowerCase()))];
-      const directSet = new Set(directHandles);
-      const discoveries = handles.filter(
-        (candidate) => candidate !== handle.toLowerCase() && !directSet.has(candidate.toLowerCase()),
-      );
-      await fetchProfilesForHandles(
-        [...directHandles, ...discoveries],
-        [...directMembers, ...members],
-      );
     } catch (error) {
-      console.error(error);
+      // Without a network scan the direct following/followers still get refreshed.
+      console.warn(error);
+      networkAvailable = false;
+    }
+    const social = socialByHandleRef.current[handle];
+    const directMembers = social?.available ? [...social.following, ...social.followers] : [];
+    const directHandles = [...new Set(directMembers.map((member) => member.username.toLowerCase()))];
+    const directSet = new Set(directHandles);
+    const discoveries = handles.filter(
+      (candidate) => candidate !== handle.toLowerCase() && !directSet.has(candidate.toLowerCase()),
+    );
+    if (!directHandles.length && !discoveries.length) {
       setStatus(language === "tr" ? "Ag taramasi bulunamadi. Chrome eklentisinden ag haritasini calistir." : "Network scan not found. Run the network map in the Chrome extension.");
       setLoading(false);
+      return;
+    }
+    await fetchProfilesForHandles([...directHandles, ...discoveries], [...directMembers, ...members]);
+    if (!networkAvailable) {
+      setStatus((current) => `${current} ${language === "tr" ? "Ag taramasi olmadigi icin yalniz takip/takipci listesi guncellendi." : "No network scan yet, so only following/followers were refreshed."}`);
     }
   }
 
@@ -1055,7 +1383,14 @@ export default function App() {
   function resetFollowerHistory() {
     const handle = (accountHandle || activeUser?.handle || "").toLowerCase();
     if (!handle) return;
-    localStorage.removeItem(`tastetwin.followers.${handle}`);
+    const confirmed = window.confirm(
+      language === "tr"
+        ? "Takipci gecmisi (kim ne zaman takip etti/cikti) ve karsilastirma baslangici silinsin mi? Once yedek almak istersen Iptal'e bas."
+        : "Delete the follower history (who followed or unfollowed and when) and the comparison baseline? Press Cancel to back up first.",
+    );
+    if (!confirmed) return;
+    // A marker, not a removal: otherwise the last saved scan would be reused as the baseline.
+    localStorage.setItem(`tastetwin.followers.${handle}`, JSON.stringify({ reset: true }));
     setSocialByHandle((current) => {
       const social = current[handle];
       if (!social?.available) return current;
@@ -1066,6 +1401,8 @@ export default function App() {
           previousCheckedAt: undefined,
           lostFollowers: [],
           newFollowers: [],
+          followerEvents: [],
+          history: [],
         },
       };
     });
@@ -1150,9 +1487,14 @@ export default function App() {
               if (event.key === "Enter") void openLetterboxdAndScan(false);
             }}
           />
-          <button className="primary-button" onClick={() => void openLetterboxdAndScan(false)} disabled={socialLoading || loading}>
+          <button className="primary-button full-refresh-button" onClick={() => void runFullRefresh()} disabled={socialLoading || loading || fullRefresh?.running}>
+            {fullRefresh?.running ? <Loader2 className="spin" size={18} /> : <RefreshCcw size={18} />}
+            <span>{language === "tr" ? "Tum verileri tek tusla guncelle" : "Refresh all data in one click"}</span>
+          </button>
+          {fullRefresh && <FullRefreshPanel language={language} steps={fullRefresh.steps} running={fullRefresh.running} />}
+          <button className="browser-scan-button" onClick={() => void openLetterboxdAndScan(false)} disabled={socialLoading || loading}>
             {socialLoading ? <Loader2 className="spin" size={18} /> : <Globe2 size={18} />}
-            <span>{language === "tr" ? "Letterboxd'u ac ve otomatik tara" : "Open Letterboxd and scan"}</span>
+            <span>{language === "tr" ? "Sadece takip/ag taramasi" : "Social and network scan only"}</span>
           </button>
           <ScanStatusPanel
             handle={(accountHandle || activeUser?.handle || "").trim().replace(/^@/, "").toLowerCase()}
@@ -1294,6 +1636,79 @@ export default function App() {
             <span>{language === "tr" ? "Yedegi geri yukle" : "Restore backup"}</span>
             <input type="file" accept=".json,application/json" disabled={!storageReady} onChange={(event) => importLocalBackup(event.target.files?.[0])} />
           </label>
+          {cloudBackup && (
+            <div className="cloud-backup">
+              <strong>{language === "tr" ? "Kisisel bulut yedegi" : "Personal cloud backup"}</strong>
+              <p>
+                {language === "tr"
+                  ? "Google Drive, OneDrive, iCloud veya Dropbox masaustu uygulamasinin senkron klasorunu sec. TasteTwin yedegi oraya yazar, senkron uygulaman buluta yukler; baska bilgisayarda ayni klasorden geri yuklersin. Hesap sifresi veya token istenmez."
+                  : "Pick the sync folder of the Google Drive, OneDrive, iCloud or Dropbox desktop app. TasteTwin writes the backup there and your sync app uploads it; restore from the same folder on another computer. No account password or token is needed."}
+              </p>
+              {cloudBackup.candidates.length > 0 && (
+                <div className="cloud-candidates">
+                  {cloudBackup.candidates.map((candidate) => (
+                    <button key={candidate.folder} className="cloud-chip" onClick={() => setCloudFolderInput(candidate.folder)} title={candidate.folder}>
+                      {candidate.provider}
+                    </button>
+                  ))}
+                </div>
+              )}
+              <div className="cloud-folder-row">
+                <input
+                  value={cloudFolderInput}
+                  onChange={(event) => setCloudFolderInput(event.target.value)}
+                  placeholder={language === "tr" ? "Klasorun tam yolu, or. G:\\My Drive" : "Full folder path, e.g. G:\\My Drive"}
+                  aria-label={language === "tr" ? "Bulut yedek klasoru" : "Cloud backup folder"}
+                />
+                <button className="browser-scan-button" disabled={cloudBusy || !cloudFolderInput.trim()} onClick={() => saveCloudFolder(cloudFolderInput)}>
+                  {language === "tr" ? "Kaydet" : "Save"}
+                </button>
+              </div>
+              {cloudBackup.folder && (
+                <>
+                  <p className="muted-line">
+                    {cloudBackup.backupDirectory}
+                    {!cloudBackup.folderAvailable && (language === "tr" ? " (su an bulunamiyor)" : " (currently missing)")}
+                    {" · "}
+                    {cloudBackup.latest
+                      ? `${language === "tr" ? "Son yedek" : "Last backup"}: ${new Date(cloudBackup.latest.savedAt).toLocaleString(language === "tr" ? "tr-TR" : "en-US")} (${(cloudBackup.latest.bytes / 1024 / 1024).toFixed(1)} MB)`
+                      : language === "tr" ? "Henuz yedek yok" : "No backup yet"}
+                  </p>
+                  <label className="cloud-auto">
+                    <input
+                      type="checkbox"
+                      checked={cloudAuto}
+                      onChange={(event) => {
+                        setCloudAuto(event.target.checked);
+                        localStorage.setItem("tastetwin.cloudAuto", event.target.checked ? "on" : "off");
+                      }}
+                    />
+                    {language === "tr" ? "Degisikliklerden 1 dakika sonra otomatik yedekle (son 14 gun saklanir)" : "Back up automatically a minute after changes (keeps 14 days)"}
+                  </label>
+                  {cloudAuto && cloudLinked !== cloudBackup.folder && (
+                    <p className="muted-line">
+                      {language === "tr"
+                        ? "Otomatik yedek, bu bilgisayar klasorle bir kez eslesince (Simdi yedekle veya Buluttan geri yukle) baslar."
+                        : "Automatic backups start once this computer has synced with the folder (Back up now or Restore from cloud)."}
+                    </p>
+                  )}
+                  <div className="cloud-folder-row">
+                    <button className="browser-scan-button" disabled={cloudBusy || !users.length} onClick={() => backupToCloud()}>
+                      <Download size={16} />
+                      <span>{language === "tr" ? "Simdi yedekle" : "Back up now"}</span>
+                    </button>
+                    <button className="browser-scan-button" disabled={cloudBusy || !cloudBackup.latest || !storageReady} onClick={restoreFromCloud}>
+                      <FileUp size={16} />
+                      <span>{language === "tr" ? "Buluttan geri yukle" : "Restore from cloud"}</span>
+                    </button>
+                    <button className="browser-scan-button" disabled={cloudBusy} onClick={() => saveCloudFolder("")}>
+                      {language === "tr" ? "Kapat" : "Turn off"}
+                    </button>
+                  </div>
+                </>
+              )}
+            </div>
+          )}
         </details>
 
         <div className="source-summary">
@@ -1387,6 +1802,7 @@ export default function App() {
                 tmdbLoading={tmdbLoading}
                 tmdbRun={tmdbRun}
                 onEnrich={enrichWithTmdb}
+                users={users}
                 hasTmdbToken={Boolean(tmdbToken.trim())}
               />
             )}
@@ -1537,6 +1953,23 @@ export default function App() {
             )}
 
             {tab === "social" && (
+              <>
+              <FullRatingsPanel
+                language={language}
+                users={users}
+                scan={ratingsScan}
+                hasSocial={Boolean(socialByHandle[accountHandle || activeUser.handle]?.available)}
+                onStart={(scope, count, pages) => void requestRatingsScan(ratingsTargetsFor(scope, count), pages)}
+                previewCount={(scope, count) => ratingsTargetsFor(scope, count).length}
+              />
+              <FilmPeopleFinder
+                language={language}
+                users={users}
+                ownerHandle={accountHandle || activeUser.handle}
+                social={socialByHandle[accountHandle || activeUser.handle]}
+                matches={matches}
+                onSelectMatch={setSelectedMatch}
+              />
               <SocialPanel
                 language={language}
                 data={socialByHandle[accountHandle || activeUser.handle]}
@@ -1560,6 +1993,7 @@ export default function App() {
                   }))
                 }
               />
+              </>
             )}
 
             {tab === "profile" && (
@@ -1634,6 +2068,7 @@ function FilmWorkspace({
   tmdbRun,
   onEnrich,
   hasTmdbToken,
+  users,
 }: {
   language: Language;
   user: UserTaste;
@@ -1648,6 +2083,7 @@ function FilmWorkspace({
   tmdbRun: TmdbRunState;
   onEnrich: () => void;
   hasTmdbToken: boolean;
+  users: UserTaste[];
 }) {
   const [view, setView] = useState<FilmWorkspaceView>("summary");
   const enrichable = user.films.filter(
@@ -1755,7 +2191,7 @@ function FilmWorkspace({
           <ViewingRhythmPanel language={language} insights={insights} />
           <BarsPanel title={t(language, "favoriteZones")} icon={<Film size={18} />} data={decadeData} />
           <PosterPanel language={language} films={user.films} />
-          <FilmArchiveBrowser language={language} films={user.films} />
+          <FilmArchiveBrowser language={language} owner={user} users={users} />
         </div>
       )}
 
@@ -2198,6 +2634,7 @@ function SocialPanel({
           <span>{language === "tr" ? "Takip gecmisini sifirla" : "Reset follow history"}</span>
         </button>
       </div>
+      <FollowerTimeline language={language} handle={data.handle} events={data.followerEvents ?? []} />
       {data.warning && (
         <p className="social-note">
           {language === "tr"
@@ -2923,104 +3360,189 @@ function PosterPanel({ language, films }: { language: Language; films: FilmSigna
   );
 }
 
-function FilmArchiveBrowser({ language, films }: { language: Language; films: FilmSignal[] }) {
-  const [query, setQuery] = useState("");
-  const [filter, setFilter] = useState<"all" | "watched" | "rated" | "loved" | "watchlist">("all");
-  const [sort, setSort] = useState<"recent" | "rating" | "title" | "runtime">("recent");
+function FilmArchiveBrowser({ language, owner, users }: { language: Language; owner: UserTaste; users: UserTaste[] }) {
+  const films = owner.films;
+  const tr = language === "tr";
+  const locale = tr ? "tr-TR" : "en-US";
+  const [filters, setFilters] = useState<ArchiveFilters>(defaultArchiveFilters);
+  const [showMore, setShowMore] = useState(false);
   const [page, setPage] = useState(1);
   const pageSize = 50;
-  const filtered = useMemo(() => {
-    const normalizedQuery = query.trim().toLocaleLowerCase(language === "tr" ? "tr-TR" : "en-US");
-    return films
-      .filter((film) => {
-        if (normalizedQuery && !`${film.title} ${film.year ?? ""}`.toLocaleLowerCase(language === "tr" ? "tr-TR" : "en-US").includes(normalizedQuery)) {
-          return false;
-        }
-        if (filter === "watched") return isWatched(film);
-        if (filter === "rated") return film.rating !== undefined;
-        if (filter === "loved") return film.liked || (film.rating ?? 0) >= 4;
-        if (filter === "watchlist") return film.watchlist && !isWatched(film);
-        return true;
-      })
-      .sort((a, b) => {
-        if (sort === "rating") return (b.rating ?? -1) - (a.rating ?? -1) || a.title.localeCompare(b.title);
-        if (sort === "title") return a.title.localeCompare(b.title);
-        if (sort === "runtime") return (b.runtimeMinutes ?? -1) - (a.runtimeMinutes ?? -1) || a.title.localeCompare(b.title);
-        return filmLatestTimestamp(b) - filmLatestTimestamp(a) || a.title.localeCompare(b.title);
-      });
-  }, [filter, films, language, query, sort]);
+  const networkRatings = useMemo(() => buildNetworkRatings(owner, users), [owner, users]);
+  const facets = useMemo(() => ({
+    genres: archiveFacet(films, "genres"),
+    directors: archiveFacet(films, "directors"),
+    countries: archiveFacet(films, "countries"),
+    languages: archiveFacet(films, "originalLanguage"),
+    years: watchedYears(films),
+  }), [films]);
+  const filtered = useMemo(() => filterArchive(films, filters, networkRatings, locale), [films, filters, networkRatings, locale]);
   const totalPages = Math.max(1, Math.ceil(filtered.length / pageSize));
   const items = filtered.slice((page - 1) * pageSize, page * pageSize);
+  const activeCount = Object.entries(filters).filter(([key, value]) => key !== "sort" && value !== defaultArchiveFilters[key as keyof ArchiveFilters]).length;
+  const set = <K extends keyof ArchiveFilters>(key: K, value: ArchiveFilters[K]) => setFilters((current) => ({ ...current, [key]: value }));
+  const optionalNumber = (value: string) => (value.trim() ? Number(value) : undefined);
 
   useEffect(() => {
     setPage(1);
-  }, [filter, query, sort]);
+  }, [filters]);
+
+  function downloadCsv() {
+    const url = URL.createObjectURL(new Blob([archiveCsv(filtered, networkRatings, language)], { type: "text/csv;charset=utf-8" }));
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = `tastetwin-film-arsivi-${new Date().toISOString().slice(0, 10)}.csv`;
+    link.click();
+    window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+  }
+
+  const facetSelect = (key: "genre" | "director" | "country" | "language", label: string, values: Array<[string, number]>) => (
+    <label className="archive-field">
+      <span>{label}</span>
+      <select value={filters[key]} onChange={(event) => set(key, event.target.value)} disabled={!values.length}>
+        <option value="">{values.length ? (tr ? "Tumu" : "All") : (tr ? "TMDB verisi yok" : "No TMDB data")}</option>
+        {values.map(([value, count]) => <option key={value} value={value}>{value} ({count})</option>)}
+      </select>
+    </label>
+  );
 
   return (
     <div className="panel film-archive-browser" data-testid="film-archive-browser">
       <div className="panel-title archive-browser-title">
         <Film size={18} />
         <div>
-          <h2>{language === "tr" ? "Tum film arsivi" : "Complete film archive"}</h2>
-          <p>{language === "tr" ? `${filtered.length}/${films.length} film gosteriliyor` : `Showing ${filtered.length}/${films.length} films`}</p>
+          <h2>{tr ? "Tum film arsivi" : "Complete film archive"}</h2>
+          <p>{tr ? `${filtered.length}/${films.length} film gosteriliyor` : `Showing ${filtered.length}/${films.length} films`}</p>
         </div>
       </div>
       <div className="archive-browser-controls">
         <label className="member-search">
           <Search size={16} />
           <input
-            value={query}
-            placeholder={language === "tr" ? "Film veya yil ara" : "Search film or year"}
-            onChange={(event) => setQuery(event.target.value)}
+            value={filters.query}
+            placeholder={tr ? "Film, yil, yonetmen veya oyuncu ara" : "Search film, year, director or cast"}
+            onChange={(event) => set("query", event.target.value)}
           />
         </label>
-        <select value={filter} onChange={(event) => setFilter(event.target.value as typeof filter)}>
-          <option value="all">{language === "tr" ? "Tum kayitlar" : "All entries"}</option>
-          <option value="watched">{language === "tr" ? "Izlenenler" : "Watched"}</option>
-          <option value="rated">{language === "tr" ? "Puanlananlar" : "Rated"}</option>
-          <option value="loved">{language === "tr" ? "Sevilenler" : "Loved"}</option>
-          <option value="watchlist">{language === "tr" ? "Izlenmemis watchlist" : "Unwatched watchlist"}</option>
+        <select value={filters.status} onChange={(event) => set("status", event.target.value as ArchiveStatus)} aria-label={tr ? "Durum" : "Status"}>
+          <option value="all">{tr ? "Tum kayitlar" : "All entries"}</option>
+          <option value="watched">{tr ? "Izlenenler" : "Watched"}</option>
+          <option value="rated">{tr ? "Puanlananlar" : "Rated"}</option>
+          <option value="loved">{tr ? "Sevilenler" : "Loved"}</option>
+          <option value="watchlist">{tr ? "Izlenmemis watchlist" : "Unwatched watchlist"}</option>
+          <option value="unrated-watched">{tr ? "Izlenip puanlanmayanlar" : "Watched but unrated"}</option>
+          <option value="rewatched">{tr ? "Tekrar izlenenler" : "Rewatched"}</option>
+          <option value="reviewed">{tr ? "Yorum yazdiklarim" : "Reviewed"}</option>
         </select>
-        <select value={sort} onChange={(event) => setSort(event.target.value as typeof sort)}>
-          <option value="recent">{language === "tr" ? "En son izlenen" : "Most recent"}</option>
-          <option value="rating">{language === "tr" ? "Puani en yuksek" : "Highest rating"}</option>
-          <option value="title">{language === "tr" ? "Film adi" : "Title"}</option>
-          <option value="runtime">{language === "tr" ? "En uzun" : "Longest runtime"}</option>
+        <select value={filters.sort} onChange={(event) => set("sort", event.target.value as ArchiveSort)} aria-label={tr ? "Siralama" : "Sort"}>
+          <option value="recent">{tr ? "En son izlenen" : "Most recent"}</option>
+          <option value="rating">{tr ? "Puani en yuksek" : "Highest rating"}</option>
+          <option value="network">{tr ? "Agin en sevdigi" : "Network favourite"}</option>
+          <option value="network-gap">{tr ? "Agdan en farkli puanim" : "Most different from network"}</option>
+          <option value="tmdb">{tr ? "TMDB puani" : "TMDB rating"}</option>
+          <option value="year">{tr ? "En yeni yapim" : "Newest release"}</option>
+          <option value="title">{tr ? "Film adi" : "Title"}</option>
+          <option value="runtime">{tr ? "En uzun" : "Longest runtime"}</option>
         </select>
+        <button className="browser-scan-button" onClick={() => setShowMore((value) => !value)} aria-expanded={showMore}>
+          <Search size={15} />
+          <span>{tr ? "Detayli filtre" : "More filters"}{activeCount ? ` (${activeCount})` : ""}</span>
+        </button>
+        <button className="browser-scan-button" onClick={downloadCsv} disabled={!filtered.length}>
+          <Download size={15} />
+          <span>CSV</span>
+        </button>
       </div>
-      <div className="archive-table">
-        {items.map((film, index) => (
-          <div className="archive-row" key={film.key}>
-            <PosterTile film={film} index={index} compact />
-            <div>
-              <strong>{film.title}</strong>
-              <span>{film.year ?? "-"}</span>
+      {showMore && (
+        <div className="archive-advanced">
+          {facetSelect("genre", tr ? "Tur" : "Genre", facets.genres)}
+          {facetSelect("director", tr ? "Yonetmen" : "Director", facets.directors)}
+          {facetSelect("country", tr ? "Ulke" : "Country", facets.countries)}
+          {facetSelect("language", tr ? "Dil" : "Language", facets.languages)}
+          <label className="archive-field">
+            <span>{tr ? "Puanim" : "My rating"}</span>
+            <div className="archive-range">
+              <input type="number" min={0} max={5} step={0.5} value={filters.minRating} onChange={(event) => set("minRating", Number(event.target.value) || 0)} aria-label={tr ? "En dusuk puan" : "Minimum rating"} />
+              <span>–</span>
+              <input type="number" min={0} max={5} step={0.5} value={filters.maxRating} onChange={(event) => set("maxRating", Number(event.target.value) || 5)} aria-label={tr ? "En yuksek puan" : "Maximum rating"} />
             </div>
-            <span>{film.rating !== undefined ? formatRating(film.rating) : "—"}</span>
-            <span>{film.runtimeMinutes ? `${film.runtimeMinutes} ${language === "tr" ? "dk" : "min"}` : "—"}</span>
-            <span>{formatFilmDate(film, language)}</span>
-            <span className="archive-state">
-              {film.watchlist && !isWatched(film)
-                ? "Watchlist"
-                : film.liked || (film.rating ?? 0) >= 4
-                  ? language === "tr" ? "Sevilen" : "Loved"
-                  : isWatched(film)
-                    ? language === "tr" ? "Izlendi" : "Watched"
-                    : "—"}
-            </span>
-          </div>
-        ))}
+          </label>
+          <label className="archive-field">
+            <span>{tr ? "Yapim yili" : "Release year"}</span>
+            <div className="archive-range">
+              <input type="number" placeholder="1900" value={filters.yearFrom ?? ""} onChange={(event) => set("yearFrom", optionalNumber(event.target.value))} aria-label={tr ? "Baslangic yili" : "From year"} />
+              <span>–</span>
+              <input type="number" placeholder="2026" value={filters.yearTo ?? ""} onChange={(event) => set("yearTo", optionalNumber(event.target.value))} aria-label={tr ? "Bitis yili" : "To year"} />
+            </div>
+          </label>
+          <label className="archive-field">
+            <span>{tr ? "Izledigim yil" : "Year watched"}</span>
+            <select value={filters.watchedYear ?? ""} onChange={(event) => set("watchedYear", optionalNumber(event.target.value))}>
+              <option value="">{tr ? "Tumu" : "All"}</option>
+              {facets.years.map((year) => <option key={year} value={year}>{year}</option>)}
+            </select>
+          </label>
+          <label className="archive-field">
+            <span>{tr ? "En fazla sure (dk)" : "Max runtime (min)"}</span>
+            <input type="number" min={0} step={10} value={filters.maxRuntime ?? ""} onChange={(event) => set("maxRuntime", optionalNumber(event.target.value))} />
+          </label>
+          <label className="archive-field">
+            <span>{tr ? "En az ag puani" : "Min network ratings"}</span>
+            <input type="number" min={0} value={filters.minNetworkRatings} onChange={(event) => set("minNetworkRatings", Math.max(0, Number(event.target.value) || 0))} />
+          </label>
+          <button className="browser-scan-button" onClick={() => setFilters({ ...defaultArchiveFilters, sort: filters.sort })} disabled={!activeCount}>
+            <X size={15} />
+            <span>{tr ? "Filtreleri temizle" : "Clear filters"}</span>
+          </button>
+          <p className="muted-line archive-note">
+            {tr
+              ? "Ag ortalamasi, TasteTwin'e yuklenen diger uyelerin (takip, takipci, ag adaylari) puanlarindan hesaplanir; RSS yalniz son aktiviteyi kapsar. Tur, yonetmen, ulke ve dil icin TMDB zenginlestirmesi gerekir."
+              : "Network mean uses ratings from other members loaded into TasteTwin (following, followers, network candidates); RSS covers recent activity only. Genre, director, country and language need TMDB enrichment."}
+          </p>
+        </div>
+      )}
+      <div className="archive-table">
+        {items.map((film, index) => {
+          const network = networkRatings.get(film.key);
+          return (
+            <div className="archive-row" key={film.key}>
+              <PosterTile film={film} index={index} compact />
+              <div>
+                <strong>{film.title}</strong>
+                <span>{[film.year, film.directors[0]].filter(Boolean).join(" · ") || "-"}</span>
+              </div>
+              <span>{film.rating !== undefined ? formatRating(film.rating) : "—"}</span>
+              <span
+                className="archive-network"
+                title={network ? network.raters.slice(0, 12).map((rater) => `@${rater.handle}: ${formatRating(rater.rating)}`).join("\n") : undefined}
+              >
+                {network ? `${tr ? "Ag" : "Net"} ${network.mean.toFixed(1)} (${network.count})` : "—"}
+              </span>
+              <span>{film.runtimeMinutes ? `${film.runtimeMinutes} ${tr ? "dk" : "min"}` : "—"}</span>
+              <span>{formatFilmDate(film, language)}</span>
+              <span className="archive-state">
+                {film.watchlist && !isWatched(film)
+                  ? "Watchlist"
+                  : film.liked || (film.rating ?? 0) >= 4
+                    ? tr ? "Sevilen" : "Loved"
+                    : isWatched(film)
+                      ? tr ? "Izlendi" : "Watched"
+                      : "—"}
+              </span>
+            </div>
+          );
+        })}
       </div>
       {filtered.length > pageSize && (
         <nav className="match-pagination archive-pagination">
           <button disabled={page <= 1} onClick={() => setPage((value) => Math.max(1, value - 1))}>
-            <ArrowLeft size={16} /> {language === "tr" ? "Onceki" : "Previous"}
+            <ArrowLeft size={16} /> {tr ? "Onceki" : "Previous"}
           </button>
           <span>
             {(page - 1) * pageSize + 1}-{Math.min(page * pageSize, filtered.length)} / {filtered.length} · {page}/{totalPages}
           </span>
           <button disabled={page >= totalPages} onClick={() => setPage((value) => Math.min(totalPages, value + 1))}>
-            {language === "tr" ? "Sonraki" : "Next"} <ArrowRight size={16} />
+            {tr ? "Sonraki" : "Next"} <ArrowRight size={16} />
           </button>
         </nav>
       )}
@@ -3310,6 +3832,7 @@ function MatchDetail({
             ? `${match.commonCount} ortak puanli film, gecerlilik %${match.confidence}. Ham uyum ${match.rawScore}; toplu ayrisma cezasi -${match.divergencePenalty}; yerel nislik ${match.nicheScore}/100. Kanit azsa skor 50'ye yaklastirilir. Watchlist ve puansiz filmler hesaba katilmaz.`
             : `${match.commonCount} co-rated films, ${match.confidence}% validity. Raw affinity ${match.rawScore}; repeated-split penalty -${match.divergencePenalty}; local niche score ${match.nicheScore}/100. Sparse evidence pulls the score toward 50. Watchlist and unrated films are excluded.`}
         </p>
+        <ScoreBreakdown match={match} language={language} />
 
         <WatchTogetherPanel target={target} match={match} language={language} />
 
@@ -3643,96 +4166,451 @@ function cleanSocialMembers(value: unknown): SocialMember[] | undefined {
   return [...members.values()];
 }
 
-function addFollowerChanges(handle: string, payload: AvailableSocialData): AvailableSocialData {
-  const key = `tastetwin.followers.${handle}`;
-  type FollowerSnapshot = {
-    checkedAt: string;
-    followers: SocialMember[];
-    scanStage?: AvailableSocialData["scanStage"];
-    comparisonPreviousCheckedAt?: string;
-    lostFollowers?: SocialMember[];
-    newFollowers?: SocialMember[];
-    history?: AvailableSocialData["history"];
+function FullRatingsPanel({
+  language,
+  users,
+  scan,
+  hasSocial,
+  onStart,
+  previewCount,
+}: {
+  language: Language;
+  users: UserTaste[];
+  scan?: { running: boolean; text: string; members: number; loaded: number };
+  hasSocial: boolean;
+  onStart: (scope: RatingsScope, count: number, pages: number) => void;
+  previewCount: (scope: RatingsScope, count: number) => number;
+}) {
+  const tr = language === "tr";
+  const [scope, setScope] = useState<RatingsScope>("matches");
+  const [count, setCount] = useState(50);
+  const [pages, setPages] = useState(8);
+  const read = users.filter((user) => user.ratingsScannedAt);
+  const ratings = read.reduce((sum, user) => sum + user.films.filter((film) => film.rating !== undefined).length, 0);
+  const pending = previewCount(scope, count);
+  const minutes = Math.max(1, Math.round((pending * pages * 1.6) / 60));
+  return (
+    <details className="panel insight-tool" open={scan?.running || undefined}>
+      <summary>
+        <Film size={18} />
+        <strong>{tr ? "Tam puan listeleri (Letterboxd film sayfalari)" : "Full rating lists (Letterboxd film pages)"}</strong>
+        <small>{tr ? `${read.length} kisinin tam listesi, ${ratings} puan` : `${read.length} full lists, ${ratings} ratings`}</small>
+      </summary>
+      <p className="muted-line">
+        {tr
+          ? "RSS her uyenin yalniz son ~50 film etkinligini verir. Eklenti, giris yaptigin Letterboxd sekmesinde secilen kisilerin herkese acik film sayfalarini (72 film/sayfa) yavasca okur ve tum puanlarini eslesmeye katar. Sayfalar arasinda 1,4 sn beklenir; 429 gelirse geri cekilir. Letterboxd kosullari otomatik toplamayi sinirlar: az kisiyle ve olculu kullan."
+          : "RSS shows only each member's last ~50 film events. The extension slowly reads the selected members' public film pages (72 films per page) in your logged-in Letterboxd tab and adds every rating to matching. It waits 1.4 s between pages and backs off on 429. Letterboxd's terms limit automated collection: use it sparingly."}
+      </p>
+      <div className="insight-tool-row">
+        <label className="archive-field">
+          <span>{tr ? "Kimler" : "Who"}</span>
+          <select value={scope} onChange={(event) => setScope(event.target.value as RatingsScope)}>
+            <option value="matches">{tr ? "En iyi eslesmeler" : "Best matches"}</option>
+            <option value="mutuals" disabled={!hasSocial}>{tr ? "Karsilikli takiplesenler" : "Mutuals"}</option>
+            <option value="following" disabled={!hasSocial}>{tr ? "Takip ettiklerim" : "Following"}</option>
+            <option value="followers" disabled={!hasSocial}>{tr ? "Takipcilerim" : "Followers"}</option>
+            <option value="directory" disabled={!hasSocial}>{tr ? "Tum dizin (ag dahil)" : "Whole directory (incl. network)"}</option>
+          </select>
+        </label>
+        <label className="archive-field">
+          <span>{tr ? "En fazla kisi" : "Max people"}</span>
+          <input type="number" min={1} max={500} value={count} onChange={(event) => setCount(Math.min(500, Math.max(1, Number(event.target.value) || 1)))} />
+        </label>
+        <label className="archive-field">
+          <span>{tr ? "Kisi basina sayfa (72 film)" : "Pages per person (72 films)"}</span>
+          <input type="number" min={1} max={40} value={pages} onChange={(event) => setPages(Math.min(40, Math.max(1, Number(event.target.value) || 1)))} />
+        </label>
+        <button className="primary-button" disabled={scan?.running || !pending} onClick={() => onStart(scope, count, pages)}>
+          {scan?.running ? <Loader2 className="spin" size={16} /> : <Search size={16} />}
+          <span>{tr ? `${pending} kisinin puanlarini oku` : `Read ${pending} people's ratings`}</span>
+        </button>
+      </div>
+      <p className="muted-line">
+        {tr
+          ? `Tahmini en fazla ~${minutes} dk. Son 30 gunde okunanlar atlanir. Uygulama ve Letterboxd sekmesi acik kalmali; her biten kisi hemen kaydedilir.`
+          : `Estimated at most ~${minutes} min. Members read in the last 30 days are skipped. Keep the app and the Letterboxd tab open; each finished member is saved at once.`}
+      </p>
+      {scan && (
+        <p className={`ratings-scan-status${scan.running ? " running" : ""}`} aria-live="polite">
+          {scan.running && <Loader2 className="spin" size={14} />} {scan.text}
+          {" · "}
+          {tr ? `${scan.loaded}/${scan.members} kisi alindi` : `${scan.loaded}/${scan.members} people received`}
+        </p>
+      )}
+    </details>
+  );
+}
+
+const FILM_CONDITIONS: Array<[FilmCondition, string, string]> = [
+  ["loved", "Sevdi (4+ veya kalp)", "Loved (4+ or heart)"],
+  ["high", "Cok sevdi (4.5+)", "Adored (4.5+)"],
+  ["disliked", "Sevmedi (2.5 ve alti)", "Disliked (2.5 or less)"],
+  ["low", "Nefret etti (1.5 ve alti)", "Hated (1.5 or less)"],
+  ["liked-heart", "Kalp verdi", "Gave a heart"],
+  ["rated", "Puanladi", "Rated"],
+  ["watched", "Izledi", "Watched"],
+];
+
+function FilmPeopleFinder({
+  language,
+  users,
+  ownerHandle,
+  social,
+  matches,
+  onSelectMatch,
+}: {
+  language: Language;
+  users: UserTaste[];
+  ownerHandle: string;
+  social?: SocialData;
+  matches: MatchResult[];
+  onSelectMatch: (match: MatchResult) => void;
+}) {
+  const tr = language === "tr";
+  const locale = tr ? "tr-TR" : "en-US";
+  const [query, setQuery] = useState("");
+  const [criteria, setCriteria] = useState<FilmCriterion[]>([]);
+  const [options, setOptions] = useState<FilmPeopleOptions>(defaultFilmPeopleOptions);
+  const [visible, setVisible] = useState(50);
+  const catalog = useMemo(() => buildFilmCatalog(users), [users]);
+  const catalogByKey = useMemo(() => new Map(catalog.map((entry) => [entry.key, entry])), [catalog]);
+  const suggestions = useMemo(() => searchFilmCatalog(catalog, query, 12, locale).filter((entry) => !criteria.some((criterion) => criterion.key === entry.key)), [catalog, criteria, locale, query]);
+  const results = useMemo(
+    () => findPeopleByFilms(users, criteria, { ...options, excludeOwner: ownerHandle }),
+    [criteria, options, ownerHandle, users],
+  );
+  const matchByHandle = useMemo(() => new Map(matches.map((match) => [match.user.handle.toLowerCase(), match])), [matches]);
+  const following = useMemo(() => new Set(social?.available ? social.following.map((member) => member.username.toLowerCase()) : []), [social]);
+  const followers = useMemo(() => new Set(social?.available ? social.followers.map((member) => member.username.toLowerCase()) : []), [social]);
+  const owner = users.find((user) => user.handle.toLowerCase() === ownerHandle.toLowerCase());
+
+  useEffect(() => setVisible(50), [criteria, options]);
+
+  function addFilm(key: string) {
+    if (criteria.length >= 12) return;
+    setCriteria((current) => [...current, { key, condition: "loved" }]);
+    setQuery("");
+  }
+
+  function pickMyFilms(kind: "loved" | "disliked") {
+    if (!owner) return;
+    const films = owner.films
+      .filter((film) => (kind === "loved" ? (film.rating ?? 0) >= 4.5 : film.rating !== undefined && film.rating <= 2))
+      .sort((a, b) => (catalogByKey.get(b.key)?.raters ?? 0) - (catalogByKey.get(a.key)?.raters ?? 0))
+      .slice(0, 5);
+    setCriteria(films.map((film) => ({ key: film.key, condition: kind })));
+    setOptions((current) => ({ ...current, match: "any" }));
+  }
+
+  function downloadCsv() {
+    const url = URL.createObjectURL(new Blob([filmPeopleCsv(results, criteria, catalogByKey, language)], { type: "text/csv;charset=utf-8" }));
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = `tastetwin-filmden-kisiler-${new Date().toISOString().slice(0, 10)}.csv`;
+    link.click();
+    window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+  }
+
+  const filmLabel = (key: string) => {
+    const entry = catalogByKey.get(key);
+    return entry ? `${entry.title}${entry.year ? ` (${entry.year})` : ""}` : key;
   };
+
+  return (
+    <details className="panel insight-tool film-people" open={criteria.length > 0 || undefined}>
+      <summary>
+        <Heart size={18} />
+        <strong>{tr ? "Filmden kisi bul" : "Find people by film"}</strong>
+        <small>{tr ? `${catalog.length} film, ${users.length} kisi icinde` : `across ${catalog.length} films and ${users.length} people`}</small>
+      </summary>
+      <p className="muted-line">
+        {tr
+          ? "Film sec, her biri icin kosul belirle (sevdi, sevmedi, izledi...). TasteTwin'e yuklenen herkes taranir; filmi hic kaydetmemis biri \"sevmedi\" sayilmaz. Tam puan listesi okunan kisilerde sonuc cok daha eksiksizdir."
+          : "Pick films and a condition for each (loved, disliked, watched...). Everyone loaded into TasteTwin is searched; someone who never logged a film is not counted as disliking it. Results are far more complete for members whose full ratings were read."}
+      </p>
+      <div className="insight-tool-row">
+        <label className="film-search film-picker">
+          <Search size={16} />
+          <input value={query} onChange={(event) => setQuery(event.target.value)} placeholder={tr ? "Film adi yaz..." : "Type a film title..."} aria-label={tr ? "Film ara" : "Search films"} />
+        </label>
+        <button className="browser-scan-button" onClick={() => pickMyFilms("loved")} disabled={!owner}>
+          {tr ? "En sevdigim 5 film" : "My 5 favourites"}
+        </button>
+        <button className="browser-scan-button" onClick={() => pickMyFilms("disliked")} disabled={!owner}>
+          {tr ? "En sevmedigim 5 film" : "My 5 least liked"}
+        </button>
+      </div>
+      {suggestions.length > 0 && (
+        <ul className="film-suggestions" role="listbox">
+          {suggestions.map((entry) => (
+            <li key={entry.key}>
+              <button onClick={() => addFilm(entry.key)}>
+                <strong>{entry.title}</strong> {entry.year && <span>{entry.year}</span>}
+                <small>{tr ? `${entry.raters} kisi` : `${entry.raters} people`}{entry.mean !== undefined ? ` · ${tr ? "ort." : "avg"} ${entry.mean.toFixed(1)}` : ""}</small>
+              </button>
+            </li>
+          ))}
+        </ul>
+      )}
+      {criteria.length > 0 && (
+        <>
+          <ul className="film-criteria">
+            {criteria.map((criterion, index) => (
+              <li key={criterion.key}>
+                <span>{filmLabel(criterion.key)}</span>
+                <select
+                  value={criterion.condition}
+                  aria-label={tr ? "Kosul" : "Condition"}
+                  onChange={(event) => setCriteria((current) => current.map((item, itemIndex) => (itemIndex === index ? { ...item, condition: event.target.value as FilmCondition } : item)))}
+                >
+                  {FILM_CONDITIONS.map(([value, trLabel, enLabel]) => <option key={value} value={value}>{tr ? trLabel : enLabel}</option>)}
+                </select>
+                <button onClick={() => setCriteria((current) => current.filter((_, itemIndex) => itemIndex !== index))} title={tr ? "Kaldir" : "Remove"}>
+                  <X size={14} />
+                </button>
+              </li>
+            ))}
+          </ul>
+          <div className="insight-tool-row">
+            <label className="archive-field">
+              <span>{tr ? "Eslesme" : "Match"}</span>
+              <select value={options.match} onChange={(event) => setOptions((current) => ({ ...current, match: event.target.value as FilmPeopleOptions["match"] }))}>
+                <option value="all">{tr ? "Tum kosullar" : "All conditions"}</option>
+                <option value="any">{tr ? "En az biri (cok uyan once)" : "Any (most matches first)"}</option>
+              </select>
+            </label>
+            <label className="archive-field">
+              <span>{tr ? "\"Sevdi\" esigi" : "\"Loved\" threshold"}</span>
+              <input type="number" min={0.5} max={5} step={0.5} value={options.lovedAt} onChange={(event) => setOptions((current) => ({ ...current, lovedAt: Number(event.target.value) || 4 }))} />
+            </label>
+            <label className="archive-field">
+              <span>{tr ? "\"Sevmedi\" esigi" : "\"Disliked\" threshold"}</span>
+              <input type="number" min={0.5} max={5} step={0.5} value={options.dislikedAt} onChange={(event) => setOptions((current) => ({ ...current, dislikedAt: Number(event.target.value) || 2.5 }))} />
+            </label>
+            <button className="browser-scan-button" onClick={downloadCsv} disabled={!results.length}>
+              <Download size={15} />
+              <span>CSV</span>
+            </button>
+            <button className="browser-scan-button" onClick={() => setCriteria([])}>
+              <X size={15} />
+              <span>{tr ? "Temizle" : "Clear"}</span>
+            </button>
+          </div>
+          <p className="muted-line"><strong>{results.length}</strong> {tr ? "kisi bulundu" : "people found"}</p>
+          <ol className="film-people-results">
+            {results.slice(0, visible).map((result) => {
+              const handle = result.user.handle.toLowerCase();
+              const match = matchByHandle.get(handle);
+              return (
+                <li key={result.user.id}>
+                  <div className="film-people-person">
+                    <a href={`https://letterboxd.com/${encodeURIComponent(result.user.handle)}/`} target="_blank" rel="noreferrer">{result.user.displayName}</a>
+                    <small>@{result.user.handle}</small>
+                    {following.has(handle) && <span className="tag">{tr ? "takip ediyorum" : "I follow"}</span>}
+                    {followers.has(handle) && <span className="tag">{tr ? "beni takip ediyor" : "follows me"}</span>}
+                    <span className="tag subtle">{result.user.source === "upload" ? "export" : result.user.ratingsScannedAt ? (tr ? "tam liste" : "full list") : "RSS"}</span>
+                    {match && match.commonCount > 0 && (
+                      <button className="tag score-tag" onClick={() => onSelectMatch(match)}>
+                        {tr ? "zevk" : "taste"} {match.score}
+                      </button>
+                    )}
+                    <b>{result.matched}/{criteria.length}</b>
+                  </div>
+                  <div className="film-people-ratings">
+                    {result.rows.map((row) => (
+                      <span key={row.key} className={row.met ? "met" : row.film ? "seen" : "unknown"} title={filmLabel(row.key)}>
+                        {filmLabel(row.key).slice(0, 28)}: {row.film?.rating !== undefined ? formatRating(row.film.rating) : row.film ? (row.film.liked ? "♥" : "✓") : "?"}
+                      </span>
+                    ))}
+                  </div>
+                </li>
+              );
+            })}
+          </ol>
+          {results.length > visible && (
+            <button className="browser-scan-button" onClick={() => setVisible((value) => value + 100)}>
+              {tr ? `Daha fazla (${results.length - visible})` : `Show more (${results.length - visible})`}
+            </button>
+          )}
+        </>
+      )}
+    </details>
+  );
+}
+
+function FullRefreshPanel({ language, steps, running }: { language: Language; steps: FullRefreshStep[]; running: boolean }) {
+  const tr = language === "tr";
+  const labels: Record<FullRefreshStep["id"], [string, string]> = {
+    own: tr ? ["Kendi son filmlerin", "RSS'teki yeni puan ve diary kayitlarin arsive eklenir."] : ["Your recent films", "New ratings and diary entries from RSS join your archive."],
+    scan: tr ? ["Takip, takipci ve ag", "Letterboxd sekmesinde eklenti tum listeleri ve ikinci halkayi tarar; takipci gecmisi guncellenir."] : ["Following, followers, network", "The extension scans every list and the second ring in your Letterboxd tab; follower history updates."],
+    activity: tr ? ["Herkesin film aktivitesi", "Takip, takipci ve ag adaylarinin RSS puanlari alinir, zevk skorlari yeniden hesaplanir."] : ["Everyone's film activity", "RSS ratings for following, followers and network candidates; taste scores are recalculated."],
+    ratings: tr ? ["En iyi eslesmelerin tam puanlari", "Eklenti en iyi 40 eslesmenin Letterboxd film sayfalarini okur; RSS'teki son 50 filmle sinirli kalmaz. 30 gun icinde okunanlar atlanir."] : ["Full ratings of top matches", "The extension reads the film pages of the top 40 matches, beyond RSS's last 50 films. Members read in the last 30 days are skipped."],
+    tmdb: tr ? ["TMDB film bilgisi", "Sure, tur, yonetmen, oyuncu ve oneriler eklenir (token gerekir)."] : ["TMDB film data", "Runtime, genres, directors, cast and recommendations (token required)."],
+    backup: tr ? ["Bulut yedegi", "Secili senkron klasorune yedek yazilir."] : ["Cloud backup", "A backup is written to your sync folder."],
+  };
+  const stateText: Record<FullRefreshStep["state"], string> = tr
+    ? { pending: "bekliyor", running: "suruyor", done: "tamam", failed: "basarisiz", skipped: "atlandi" }
+    : { pending: "waiting", running: "running", done: "done", failed: "failed", skipped: "skipped" };
+  return (
+    <ol className="full-refresh-steps" aria-live="polite">
+      {steps.map((step) => (
+        <li key={step.id} className={step.state}>
+          <span className="full-refresh-state">
+            {step.state === "running" ? <Loader2 className="spin" size={14} /> : step.state === "done" ? "✓" : step.state === "failed" ? "!" : "·"}
+          </span>
+          <div>
+            <strong>{labels[step.id][0]}</strong> <small>{stateText[step.state]}</small>
+            <p>{labels[step.id][1]}</p>
+          </div>
+        </li>
+      ))}
+      {!running && (
+        <li className="done">
+          <span className="full-refresh-state">✓</span>
+          <div><strong>{tr ? "Bitti" : "Finished"}</strong></div>
+        </li>
+      )}
+    </ol>
+  );
+}
+
+function ScoreBreakdown({ match, language }: { match: MatchResult; language: Language }) {
+  const tr = language === "tr";
+  const bias = match.ratingBias ?? 0;
+  const biasText = Math.abs(bias) < 0.25
+    ? tr ? "Ortak filmlerde ikinizin puan olcegi benzer." : "You both use a similar rating scale on common films."
+    : tr
+      ? `${match.user.displayName} ortak filmlerde senden ortalama ${Math.abs(bias).toFixed(1)} yildiz ${bias > 0 ? "comert" : "sert"} puanliyor.`
+      : `${match.user.displayName} rates common films ${Math.abs(bias).toFixed(1)} stars ${bias > 0 ? "more generously" : "more harshly"} than you on average.`;
+  const rows: Array<[string, string, string]> = [
+    [
+      tr ? "Yildiz farki modeli" : "Star-gap model",
+      String(match.absoluteScore ?? match.rawScore),
+      tr ? "0-1 fark arti, 1.5 notr, 2+ eksi; sevme/sevmeme ayrimi daha agir." : "0-1 gaps add, 1.5 is neutral, 2+ subtracts; love/hate splits weigh more.",
+    ],
+    [
+      tr ? "Goreli siralama uyumu" : "Relative rank agreement",
+      match.relativeScore === undefined ? (tr ? "yetersiz" : "too little data") : String(match.relativeScore),
+      match.relativeScore === undefined
+        ? tr ? "En az 4 ortak film ve kisi basina 8 puan gerekir." : "Needs 4 common films and 8 ratings per person."
+        : tr
+          ? `Her filmin kisinin kendi puanlari icindeki yeri karsilastirilir (Criticker yontemi). Ham uyuma %${match.relativeWeight ?? 0} etkiler.`
+          : `Compares where each film sits within each person's own ratings (Criticker-style). Contributes ${match.relativeWeight ?? 0}% of raw affinity.`,
+    ],
+    [tr ? "Gecerlilik" : "Validity", `%${match.confidence}`, tr ? "Ortak film arttikca yukselir; dusukse skor 50'ye cekilir." : "Rises with common films; low validity pulls the score to 50."],
+  ];
+  return (
+    <div className="score-breakdown">
+      <h3>{tr ? "Puan nasil hesaplandi?" : "How the score was built"}</h3>
+      <dl>
+        {rows.map(([label, value, note]) => (
+          <div key={label}>
+            <dt>{label}</dt>
+            <dd><strong>{value}</strong><span>{note}</span></dd>
+          </div>
+        ))}
+      </dl>
+      <p className="muted-line">{biasText}</p>
+    </div>
+  );
+}
+
+function FollowerTimeline({ language, handle, events }: { language: Language; handle: string; events: FollowerEvent[] }) {
+  const [kind, setKind] = useState<"all" | FollowerEvent["kind"]>("all");
+  const [visible, setVisible] = useState(30);
+  const locale = language === "tr" ? "tr-TR" : "en-US";
+  const summary = useMemo(() => summarizeFollowerEvents(events), [events]);
+  const shown = useMemo(
+    () => [...events].reverse().filter((event) => kind === "all" || event.kind === kind),
+    [events, kind],
+  );
+  if (!events.length) return null;
+  function downloadCsv() {
+    const url = URL.createObjectURL(new Blob([followerEventsCsv(events, language)], { type: "text/csv;charset=utf-8" }));
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = `tastetwin-takipci-gecmisi-${handle}-${new Date().toISOString().slice(0, 10)}.csv`;
+    link.click();
+    window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+  }
+  return (
+    <div className="panel follower-timeline">
+      <div className="follower-timeline-head">
+        <div>
+          <h2>{language === "tr" ? "Takipci gecmisi" : "Follower history"}</h2>
+          <p className="muted-line">
+            {language === "tr"
+              ? `${summary.followed} takip, ${summary.unfollowed} takipten cikma kaydi. Tarih, degisikligi ilk goren taramadir; asil an iki tarama arasindadir.`
+              : `${summary.followed} follows and ${summary.unfollowed} unfollows recorded. The date is the scan that first saw the change; it happened between two scans.`}
+            {summary.repeatPeople > 0 && (language === "tr"
+              ? ` ${summary.repeatPeople} kisi birden fazla kez gidip geldi.`
+              : ` ${summary.repeatPeople} people changed more than once.`)}
+          </p>
+        </div>
+        <div className="follower-timeline-actions">
+          <select value={kind} onChange={(event) => { setKind(event.target.value as typeof kind); setVisible(30); }}>
+            <option value="all">{language === "tr" ? "Tumu" : "All"}</option>
+            <option value="followed">{language === "tr" ? "Takip edenler" : "Followed"}</option>
+            <option value="unfollowed">{language === "tr" ? "Takipten cikanlar" : "Unfollowed"}</option>
+          </select>
+          <button className="browser-scan-button" onClick={downloadCsv}>
+            <Download size={16} />
+            <span>CSV</span>
+          </button>
+        </div>
+      </div>
+      <ol className="follower-timeline-list">
+        {shown.slice(0, visible).map((event) => (
+          <li key={`${event.username}-${event.kind}-${event.detectedAt}`} className={event.kind}>
+            <b>{event.kind === "followed" ? "+" : "−"}</b>
+            <a href={`https://letterboxd.com/${encodeURIComponent(event.username)}/`} target="_blank" rel="noreferrer">
+              {event.displayName}
+            </a>
+            <small>@{event.username}</small>
+            <time title={event.since ? `${new Date(event.since).toLocaleString(locale)} – ${new Date(event.detectedAt).toLocaleString(locale)}` : undefined}>
+              {new Date(event.detectedAt).toLocaleDateString(locale)}
+            </time>
+          </li>
+        ))}
+      </ol>
+      {shown.length > visible && (
+        <button className="browser-scan-button" onClick={() => setVisible((count) => count + 100)}>
+          {language === "tr" ? `Daha fazla (${shown.length - visible})` : `Show more (${shown.length - visible})`}
+        </button>
+      )}
+    </div>
+  );
+}
+
+function addFollowerChanges(handle: string, payload: AvailableSocialData, saved?: SocialData): AvailableSocialData {
+  const key = `tastetwin.followers.${handle}`;
   let previous: FollowerSnapshot | undefined;
+  let resetRequested = false;
   try {
-    previous = JSON.parse(localStorage.getItem(key) ?? "null") ?? undefined;
+    const stored = JSON.parse(localStorage.getItem(key) ?? "null");
+    resetRequested = stored?.reset === true;
+    previous = Array.isArray(stored?.followers) ? stored : undefined;
   } catch {
     previous = undefined;
   }
-
-  if (payload.complete === false) {
-    return {
-      ...payload,
-      previousCheckedAt: previous?.checkedAt,
-      lostFollowers: [],
-      newFollowers: [],
-      history: previous?.history ?? [],
+  const savedSocial = saved?.available ? saved : undefined;
+  // After a backup restore or on a new computer the browser snapshot is missing;
+  // the last complete scan saved in app storage is the same baseline.
+  if (!previous && !resetRequested && savedSocial && savedSocial.complete !== false && savedSocial.followers.length) {
+    previous = {
+      checkedAt: savedSocial.checkedAt,
+      followers: savedSocial.followers,
+      scanStage: savedSocial.scanStage,
+      comparisonPreviousCheckedAt: savedSocial.previousCheckedAt,
+      lostFollowers: savedSocial.lostFollowers,
+      newFollowers: savedSocial.newFollowers,
+      history: savedSocial.history,
     };
   }
-
-  const currentNames = new Set(payload.followers.map((member) => member.username.toLowerCase()));
-  const sameFollowers =
-    previous?.followers.length === payload.followers.length &&
-    previous.followers.every((member) => currentNames.has(member.username.toLowerCase()));
-  if (
-    payload.scanStage === "network-complete" &&
-    previous?.scanStage === "social-complete" &&
-    sameFollowers
-  ) {
-    const history = [...(previous.history ?? [])];
-    const latest = history[history.length - 1];
-    if (latest) latest.networkCandidates = payload.network?.candidateCount;
-    const snapshot: FollowerSnapshot = {
-      ...previous,
-      checkedAt: payload.checkedAt,
-      scanStage: "network-complete",
-      history,
-    };
-    localStorage.setItem(key, JSON.stringify(snapshot));
-    return {
-      ...payload,
-      previousCheckedAt: previous.comparisonPreviousCheckedAt,
-      lostFollowers: previous.lostFollowers ?? [],
-      newFollowers: previous.newFollowers ?? [],
-      history,
-    };
-  }
-
-  const previousNames = new Set((previous?.followers ?? []).map((member) => member.username.toLowerCase()));
-  const lostFollowers = previous?.followers.filter((member) => !currentNames.has(member.username.toLowerCase())) ?? [];
-  const newFollowers = previous
-    ? payload.followers.filter((member) => !previousNames.has(member.username.toLowerCase()))
-    : [];
-  const history = [
-    ...(previous?.history ?? []),
-    {
-      checkedAt: payload.checkedAt,
-      following: payload.counts.following,
-      followers: payload.counts.followers,
-      mutuals: payload.counts.mutuals,
-      newFollowers: newFollowers.length,
-      lostFollowers: lostFollowers.length,
-      networkCandidates: payload.network?.candidateCount,
-    },
-  ].slice(-50);
-
-  localStorage.setItem(key, JSON.stringify({
-    checkedAt: payload.checkedAt,
-    followers: payload.followers,
-    scanStage: payload.scanStage,
-    comparisonPreviousCheckedAt: previous?.checkedAt,
-    lostFollowers,
-    newFollowers,
-    history,
-  } satisfies FollowerSnapshot));
-  return {
-    ...payload,
-    previousCheckedAt: previous?.checkedAt,
-    lostFollowers,
-    newFollowers,
-    history,
-  };
+  const previousEvents = resetRequested ? [] : savedSocial?.followerEvents ?? [];
+  const { changes, snapshot } = computeFollowerChanges(payload, previous, previousEvents);
+  if (snapshot) localStorage.setItem(key, JSON.stringify(snapshot));
+  return { ...payload, ...changes };
 }
 
 function loadStoredUsers(): UserTaste[] {
@@ -4024,7 +4902,7 @@ function ScanStatusPanel({
             </span>
           </button>
         ) : null}
-        {!running && failed && (
+        {!running && failed && progress?.mode !== "ratings" && (
           <button className="browser-scan-button" onClick={() => onResume(false)}>
             <Globe2 size={15} />
             <span>{language === "tr" ? "Bastan tara" : "Scan from scratch"}</span>

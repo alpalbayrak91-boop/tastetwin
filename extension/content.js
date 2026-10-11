@@ -7,6 +7,8 @@ const RETRY_DELAYS_MS = [5000, 12000, 25000];
 const HEARTBEAT_MS = 12000;
 const CHECKPOINT_EVERY_CONNECTORS = 5;
 const SOCIAL_PERCENT_SHARE = 22;
+const MAX_RATINGS_MEMBERS = 500;
+const MAX_RATINGS_PAGES = 40;
 
 let activeScan;
 let lastProgress;
@@ -105,10 +107,107 @@ async function claimAppRequestedScan() {
       text: "TasteTwin uygulamasindan tarama emri alindi",
       handle,
     });
+    if (result.mode === "ratings") {
+      await startRatingsScan(handle, result.handles, result.maxPages);
+      return;
+    }
     await startScan(result.mode === "social" ? "social" : "full", { resume: result.resume === true });
   } catch {
     // The local app may be closed or this page may not be the requested profile.
   }
+}
+
+// Reads members' public film pages (/<member>/films/page/N/) slowly, one
+// member at a time, and hands each finished member to the local app. RSS only
+// shows recent activity; these pages carry every rating the member made public.
+function startRatingsScan(owner, handles, maxPages) {
+  if (activeScan) return activeScan;
+  cancelRequestedLocally = false;
+  const members = [...new Set((Array.isArray(handles) ? handles : []).map((value) => String(value).toLowerCase()))]
+    .filter((value) => /^[a-z0-9_-]{2,32}$/.test(value))
+    .slice(0, MAX_RATINGS_MEMBERS);
+  const pageLimit = Math.min(MAX_RATINGS_PAGES, Math.max(1, Number(maxPages) || 8));
+  activeScan = runRatingsScan(owner, members, pageLimit)
+    .then((summary) => {
+      notify({ state: "complete", phase: "done", mode: "ratings", percent: 100, text: `Puan taramasi bitti: ${summary.members} kisi, ${summary.films} film puani`, handle: owner });
+      return summary;
+    })
+    .catch((error) => {
+      const detail = error instanceof ScanCancelled
+        ? { code: "cancelled", message: "Puan taramasi iptal edildi.", hint: "Taranan kisiler kaydedildi." }
+        : describeError(error);
+      notify({ state: error instanceof ScanCancelled ? "cancelled" : "error", phase: "error", mode: "ratings", percent: lastProgress?.percent ?? 0, code: detail.code, text: detail.message, hint: detail.hint, handle: owner });
+      throw error;
+    })
+    .finally(() => {
+      activeScan = undefined;
+      stopHeartbeat();
+      void clearControl();
+    });
+  return activeScan;
+}
+
+async function runRatingsScan(owner, members, pageLimit) {
+  if (!globalThis.TasteTwinFilmGrid) {
+    throw new ScanFailure("parser-missing", "Film sayfasi okuyucu yuklenemedi.", "Eklentiyi chrome://extensions sayfasindan yenile.");
+  }
+  const startedAt = new Date().toISOString();
+  const started = await chrome.runtime.sendMessage({ type: "beginScan", handle: owner, mode: "ratings", startedAt });
+  if (!started?.ok) throw new ScanFailure("start-failed", started?.error ?? "Tarama baslatilamadi.", "Sayfayi yenileyip tekrar dene.");
+  startHeartbeat();
+  let totalFilms = 0;
+  let failed = 0;
+  for (let index = 0; index < members.length; index += 1) {
+    const member = members[index];
+    await assertNotCancelled();
+    notify({
+      state: "ratings",
+      phase: "ratings",
+      mode: "ratings",
+      percent: Math.round((index / Math.max(members.length, 1)) * 100),
+      text: `Puanlar okunuyor: @${member} (${index + 1}/${members.length})`,
+      current: index,
+      total: members.length,
+      startedAt,
+      handle: owner,
+    });
+    try {
+      const result = await scanMemberFilms(member, pageLimit);
+      totalFilms += result.films.length;
+      const saved = await chrome.runtime.sendMessage({ type: "saveFilmRatings", payload: { handle: member, ...result, scannedAt: new Date().toISOString() } });
+      if (!saved?.ok) throw new ScanFailure("app-offline", "TasteTwin uygulamasina kaydedilemedi.", "TasteTwin acik mi kontrol et; taranan kisiler kayitli.");
+    } catch (error) {
+      if (error instanceof ScanCancelled || isBlockingError(error) || error?.code === "rate-limited") throw error;
+      failed += 1;
+    }
+    if (index < members.length - 1) await delay(PAGE_DELAY_MS);
+  }
+  return { members: members.length - failed, failed, films: totalFilms };
+}
+
+async function scanMemberFilms(member, pageLimit) {
+  const films = new Map();
+  let page = 1;
+  let complete = false;
+  while (page <= pageLimit) {
+    await assertNotCancelled();
+    const url = page === 1 ? `/${member}/films/` : `/${member}/films/page/${page}/`;
+    const response = await fetchPage(url, `@${member} filmleri`);
+    const html = await response.text();
+    if (/Just a moment|Enable JavaScript and cookies to continue/i.test(html)) {
+      throw new ScanFailure("cloudflare", "Letterboxd tarayici dogrulamasi istedi.", "Sekmedeki dogrulamayi tamamla, sonra yeniden baslat.");
+    }
+    const documentPage = new DOMParser().parseFromString(html, "text/html");
+    const parsed = globalThis.TasteTwinFilmGrid.parseFilmGrid(documentPage);
+    for (const film of parsed) films.set(film.slug, film);
+    if (!parsed.length || !globalThis.TasteTwinFilmGrid.hasNextFilmPage(documentPage, parsed.length)) {
+      complete = true;
+      break;
+    }
+    page += 1;
+    if (page <= pageLimit) await delay(PAGE_DELAY_MS);
+  }
+  return { films: [...films.values()], pages: Math.min(page, pageLimit), complete };
 }
 
 async function claimAppRequestedManage() {

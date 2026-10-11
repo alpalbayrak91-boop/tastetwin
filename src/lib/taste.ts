@@ -57,10 +57,11 @@ export function decadeTerms(user: UserTaste, limit = 6) {
 export function buildMatches(target: UserTaste, users: UserTaste[]): MatchResult[] {
   const targetMap = new Map(target.films.map((film) => [film.key, film]));
   const community = buildCommunityStats([target, ...users]);
+  const targetProfile = ratingProfile(target);
 
   return users
     .filter((user) => user.id !== target.id)
-    .map((user) => scoreUser(target, targetMap, user, community))
+    .map((user) => scoreUser(target, targetMap, user, community, targetProfile))
     .sort((a, b) => b.score - a.score);
 }
 
@@ -72,12 +73,13 @@ export async function buildMatchesAsync(
   const candidates = users.filter((user) => user.id !== target.id);
   const targetMap = new Map(target.films.map((film) => [film.key, film]));
   const community = buildCommunityStats([target, ...users]);
+  const targetProfile = ratingProfile(target);
   const results: MatchResult[] = [];
   const chunkSize = 24;
 
   for (let offset = 0; offset < candidates.length; offset += chunkSize) {
     const chunk = candidates.slice(offset, offset + chunkSize);
-    for (const candidate of chunk) results.push(scoreUser(target, targetMap, candidate, community));
+    for (const candidate of chunk) results.push(scoreUser(target, targetMap, candidate, community, targetProfile));
     onProgress?.(Math.min(offset + chunk.length, candidates.length), candidates.length);
     await yieldToBrowser();
   }
@@ -113,7 +115,10 @@ function scoreUser(
   targetMap: Map<string, FilmSignal>,
   candidate: UserTaste,
   community: CommunityStats,
+  targetProfile: RatingProfile,
 ): MatchResult {
+  const candidateProfile = ratingProfile(candidate);
+  const percentilePairs: Array<[number, number]> = [];
   let totalImpact = 0;
   let totalWeight = 0;
   const sharedLoves: FilmSignal[] = [];
@@ -147,6 +152,7 @@ function scoreUser(
       signal = "divergence";
       divergences.push({ film: targetFilm, targetRating, candidateRating });
     }
+    percentilePairs.push([targetProfile.percentile(targetRating), candidateProfile.percentile(candidateRating)]);
     impact = Math.round(clamp(impact * discriminativeWeight, -90, 75));
     totalImpact += impact;
     totalWeight += discriminativeWeight;
@@ -166,9 +172,25 @@ function scoreUser(
   const commonCount = commonFilms.length;
   const divergenceRatio = commonCount ? divergences.length / commonCount : 0;
   const divergencePenalty = Math.round(18 * divergenceRatio ** 1.35);
-  const rawScore = commonCount
+  const absoluteScore = commonCount
     ? Math.round(clamp(50 + totalImpact / Math.max(totalWeight, 1) - divergencePenalty, 0, 99))
     : 0;
+  // Relative agreement compares where each film sits within each person's own
+  // rating habits, so a harsh rater and a generous rater who order films the
+  // same way still agree. It needs enough films to know those habits.
+  const relativeScore =
+    commonCount >= RELATIVE_MIN_COMMON &&
+    targetProfile.count >= RELATIVE_MIN_RATINGS &&
+    candidateProfile.count >= RELATIVE_MIN_RATINGS
+      ? rankAgreement(percentilePairs)
+      : undefined;
+  const relativeWeight = relativeScore === undefined ? 0 : RELATIVE_MAX_WEIGHT * clamp((commonCount - 3) / 12, 0, 1);
+  const rawScore = commonCount
+    ? Math.round(clamp(absoluteScore * (1 - relativeWeight) + (relativeScore ?? 0) * relativeWeight, 0, 99))
+    : 0;
+  const coRatedMean = (side: 0 | 1) =>
+    commonFilms.reduce((sum, row) => sum + (side === 0 ? row.targetRating : row.candidateRating), 0) / Math.max(commonCount, 1);
+  const ratingBias = commonCount ? Number((coRatedMean(1) - coRatedMean(0)).toFixed(2)) : 0;
   const confidence = Math.round(clamp(1 - Math.exp(-commonCount / 8), 0, 1) * 100);
   const evidenceFactor = confidence / 100;
   const score = commonCount ? Math.round(50 + (rawScore - 50) * evidenceFactor) : 0;
@@ -195,6 +217,10 @@ function scoreUser(
     recommendationScore,
     score,
     rawScore,
+    absoluteScore,
+    relativeScore,
+    relativeWeight: Math.round(relativeWeight * 100),
+    ratingBias,
     confidence,
     candidateFilmCount: candidate.films.filter((film) => film.rating !== undefined).length,
     commonCount,
@@ -252,6 +278,56 @@ function interpolateGapScore(difference: number) {
     }
   }
   return points.at(-1)?.[1] ?? -65;
+}
+
+const RELATIVE_MIN_COMMON = 4;
+const RELATIVE_MIN_RATINGS = 8;
+const RELATIVE_MAX_WEIGHT = 0.3;
+
+type RatingProfile = { count: number; mean: number; percentile: (rating: number) => number };
+
+/** Where a rating sits in the member's own distribution: 0 = their lowest, 1 = their highest. */
+export function ratingProfile(user: UserTaste): RatingProfile {
+  const ratings = user.films.flatMap((film) => (film.rating === undefined ? [] : [film.rating])).sort((a, b) => a - b);
+  const count = ratings.length;
+  const mean = count ? ratings.reduce((sum, value) => sum + value, 0) / count : 0;
+  const cache = new Map<number, number>();
+  return {
+    count,
+    mean,
+    percentile(rating) {
+      const cached = cache.get(rating);
+      if (cached !== undefined) return cached;
+      let below = 0;
+      let equal = 0;
+      for (const value of ratings) {
+        if (value < rating) below += 1;
+        else if (value === rating) equal += 1;
+        else break;
+      }
+      const result = count ? (below + equal / 2) / count : 0.5;
+      cache.set(rating, result);
+      return result;
+    },
+  };
+}
+
+/** Spearman-style correlation of personal percentiles, mapped to 0-100 (50 = unrelated). */
+export function rankAgreement(pairs: Array<[number, number]>) {
+  if (pairs.length < 2) return undefined;
+  const meanA = pairs.reduce((sum, [a]) => sum + a, 0) / pairs.length;
+  const meanB = pairs.reduce((sum, [, b]) => sum + b, 0) / pairs.length;
+  let covariance = 0;
+  let varianceA = 0;
+  let varianceB = 0;
+  for (const [a, b] of pairs) {
+    covariance += (a - meanA) * (b - meanB);
+    varianceA += (a - meanA) ** 2;
+    varianceB += (b - meanB) ** 2;
+  }
+  if (varianceA < 1e-9 || varianceB < 1e-9) return undefined;
+  const correlation = covariance / Math.sqrt(varianceA * varianceB);
+  return Math.round(clamp(50 + correlation * 50, 0, 100));
 }
 
 type FilmCommunityStat = { count: number; mean: number; variance: number };

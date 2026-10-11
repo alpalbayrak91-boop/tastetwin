@@ -1,6 +1,30 @@
 # TasteTwin urun ve teknik notlari
 
-Son guncelleme: 26 Eylul 2026
+Son guncelleme: 9 Ekim 2026
+
+## 10 Ekim 2026 - Tam puan listeleri ve filmden kisi bulma
+
+- Eklenti 0.6.0: secilen uyelerin `/<uye>/films/page/N/` sayfalarini okur. Ayristirici letterboxdpy'nin destekledigi iki yapiyi tanir: React `li.griditem` + `data-item-slug`/`data-item-name`, eski `li.poster-container` + `data-film-slug`; puan `rated-1..10` sinifindan (yarim yildiz), kalp `like` sinifindan. Ornek sayfalar `tests/fixtures/` altinda; canli sayfayla dogrulanmadi.
+- Sunucu okunan puanlari `film-ratings.json`'a yazar; film anahtari RSS/export ile ayni (`film-<baslik>-<yil>`), boylece eslesme, arsiv filtreleri ve ag ortalamasi dogrudan kullanir. Export'un yerine asla gecmez.
+- Tek tus guncellemeye "en iyi 40 eslesmenin tam puanlari" adimi eklendi (kisi basina 6 sayfa, 30 gun icinde okunanlar atlanir).
+- Filmden kisi bul: film secimi, film basina kosul, hepsi/herhangi, esikler, CSV. Bilinmeyen = sevmedi degil.
+
+## 9 Ekim 2026 - 0.6.0: puanlama v3, tek tus guncelleme, arsiv filtreleri
+
+- Puanlama v3: yildiz farki modeli (v2) korunur; ustune Criticker'daki gibi goreli siralama uyumu eklenir. Her puan kisinin kendi puan dagilimindaki yuzdelik yere cevrilir, ortak filmlerde bu yuzdeliklerin korelasyonu 0-100'e esler (50 = iliskisiz). En az 4 ortak film ve kisi basina 8 puan gerekir; agirligi ortak film sayisiyla %0'dan %30'a cikar. Eslesme detayinda iki parca, gecerlilik ve "kim daha comert puanliyor" gosterilir.
+- Tek tus: kendi RSS -> eklenti sosyal+ag taramasi -> herkesin RSS aktivitesi -> TMDB (token varsa) -> bulut yedegi. Her adim ayri; tarama basarisiz olursa digerleri yine calisir. Ag taramasi yoksa takip/takipci listesi yine guncellenir.
+- Film arsivi: tur, yonetmen, ulke, dil, puan araligi, yapim yili araligi, izlenen yil, en fazla sure, en az ag puani; yeni durumlar (puansiz izlenen, tekrar izlenen, yorumlu); ag ortalamasi sutunu ve "agdan en farkli puanim" siralamasi; filtrelenmis CSV.
+- GitHub Actions: PR'larda testler; `v*` etiketinde Windows kurulum paketi ve eklenti ZIP'i Release'e eklenir.
+- Rakip arastirmasi: `docs/COMPETITOR-RESEARCH.md`.
+
+## 9 Ekim 2026 - Takipci gecmisi ve kisisel bulut yedegi
+
+- Takipci gecmisi isim bazinda: her tam taramada kim takip etti / birakti, hangi iki tarama arasinda. Filtre ve CSV var; sosyal veriyle birlikte saklanir ve yedege girer.
+- Ag asamasi surerken ayni sosyal sonucun tekrar islenmesi yeni/cikan listelerini sifirliyordu; duzeltildi ve testlendi.
+- Yedek takipci karsilastirma baslangicini da tasir. Yeni bilgisayarda son tam tarama baslangic sayilir.
+- Kisisel bulut: TasteTwin kendi bulutunu calistirmaz. Kullanici Google Drive/OneDrive/iCloud/Dropbox senkron klasorunu secer; yedek oraya yazilir, senkron uygulamasi yukler. 14 gunluk kopya tutulur. Ilk eslesmeden once otomatik yazma yoktur.
+- Internet/web surumu yok: yerel sunucu ve eklenti koprusu 127.0.0.1'e bagli. Web'e tasima hesap sistemi, sunucu depolamasi ve veri merkezi IP'lerinden Letterboxd erisimi gerektirir.
+
 
 ## 26 Eylul 2026 - Dogruluk ve birlikte izleme guncellemesi
 

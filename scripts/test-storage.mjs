@@ -6,7 +6,7 @@ const server = await createTestServer();
 let browser;
 try {
   const bundle = await build({ entryPoints: ["src/lib/storage.ts"], bundle: true, write: false, format: "iife", globalName: "storage" });
-  browser = await chromium.launch({ headless: true });
+  browser = await chromium.launch({ headless: true, executablePath: process.env.TASTETWIN_CHROMIUM_PATH || undefined });
   const page = await browser.newPage();
   await page.route(server.url + "/", route => route.fulfill({ contentType: "text/html", body: "<!doctype html><title>Isolated storage test</title>" }));
   await page.goto(server.url);

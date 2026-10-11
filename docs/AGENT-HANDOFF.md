@@ -60,6 +60,76 @@ Letterboxd yorum trafiğinden **konuşma geçmişi** ve **sosyal yakınlık** ç
 
 ---
 
+## Claude (bulut oturumu) — 09.10.2026 durum ve yerel ajanlara notlar
+
+Bu oturum bulutta çalıştı: Alp'in bilgisayarına, kurulu uygulamaya, Letterboxd'a ve TMDB'ye erişimi yoktu (ağ politikası `letterboxd.com` ve `api.themoviedb.org`'u engelledi). Aşağıdakiler bu yüzden **yerelde doğrulanmalı**.
+
+**GitHub durumu (09.10):** `main` ve `claude/confident-galileo-fcesl0` aynı commit'teydi (`6a2e684`, 0.5.0). GitHub'da push edilmemiş fark yoktu. Alp'in makinesindeki çalışma klasöründe commit'lenmemiş değişiklik olup olmadığını buradan göremiyorum.
+
+**Bu oturumda eklenenler (PR'da):**
+- Takipçi geçmişi: kim ne zaman takip etti / bıraktı, isim bazında, filtre ve CSV. `src/lib/follower-history.ts`, kişi geçmişi sosyal veride (`followerEvents`) tutuluyor, yedeğe giriyor.
+- Hata düzeltmesi: ağ taraması sürerken uygulama aynı sosyal sonucu 3,5 sn'de bir yeniden işliyordu; ikinci işlemde "yeni takipçi / takipten çıkan" listeleri sıfırlanıyor, sayım geçmişi kopyalarla doluyordu. Artık aynı tarama tekrar gelince hiçbir şey değişmiyor (`computeFollowerChanges`, testli).
+- Yedek artık takipçi karşılaştırma başlangıcını (`followerBaselines`) da içeriyor. localStorage boşsa (yeni bilgisayar, geri yükleme) son tam tarama başlangıç sayılıyor.
+- Kişisel bulut yedeği: Google Drive / OneDrive / iCloud / Dropbox senkron klasörüne `TasteTwin/tastetwin-latest.json` + 14 günlük kopya. Yeni kurulum, klasörle bir kez eşleşmeden otomatik yazmaz.
+
+**Yerel ajandan (Codex / Claude Desktop) istenenler — sonucu bu dosyaya yaz:**
+- [ ] `git status` ve `git log origin/main..HEAD`: Alp'in makinesinde push edilmemiş veya commit'lenmemiş iş var mı? Varsa önce o commit'lensin, sonra bu PR ile birleştirilsin.
+- [ ] `npm ci && npm test && npm run test:browser` Windows'ta geçiyor mu?
+- [ ] Google Drive for desktop kuruluysa: aday listesinde `G:\My Drive` (Türkçe Windows'ta `G:\Drive'ım`) görünüyor mu? Görünmüyorsa gerçek yolu yaz, `cloudFolderCandidates()`'a eklensin.
+- [ ] Bulut yedeği: klasör seç → dosya Drive'da görünüyor mu? İkinci bilgisayarda (ya da temizlenmiş profil) "Buluttan geri yükle" çalışıyor mu? 50 MB+ arşivde süre nasıl?
+- [ ] Gerçek hesapla iki tam tarama arasında takipçi geçmişi doğru isimleri gösteriyor mu? Ağ aşaması sürerken "Yeni takipçi" sayısı artık sıfırlanmamalı.
+- [ ] `npm run make` ile yeni kurulum paketi; kurulu uygulamada (`%APPDATA%\TasteTwin`) eski veri sorunsuz açılıyor mu?
+- [ ] Eski açık madde: eklenti hâlâ `127.0.0.1:5173`'e sabit. 5173 doluyken popup uyarısı eklendi mi?
+
+**0.6.0 eklemeleri için yerelde denenecekler:**
+- [ ] "Tüm verileri tek tuşla güncelle": eklenti kuruluyken beş adım sırayla tamamlanıyor mu? Eklenti yokken tarama adımı ~3 dk sonra "başarısız" olup diğer adımlar devam ediyor mu?
+- [ ] Gerçek arşivde puanlama v3: eşleşme detayındaki "Göreli sıralama uyumu" ve cömert/sert cümlesi mantıklı mı? Sıralama v2'ye göre beklenmedik oynadı mı?
+- [ ] GitHub Actions "Windows installer" iş akışını elle çalıştır; çıkan `TasteTwin-Setup.exe` kuruluyor mu? (Electron indirmesi runner'da `.electron-cache` olmadan yapılır.)
+- [ ] Veri çekmeyi büyütme önerisi (uygulanmadı, gerçek HTML gerekiyor): eklentiye üyelerin `/<üye>/films/ratings/page/N/` sayfalarını yavaş ve kullanıcı başlatmalı okuyan bir mod. RSS yalnız son ~50 aktiviteyi veriyor. Letterboxd koşullarını önce oku; sayfa başına bekleme ve üst sınır koy.
+
+**10.10 eklenen tam puan taraması için yerelde mutlaka doğrulanacaklar (bulut oturumu Letterboxd'a erişemedi):**
+- [ ] Eklentiyi 0.6.0'a güncelle (Load unpacked → yenile). Sosyal sekmesinde "Tam puan listeleri" → 3 kişi, 1 sayfa ile dene. Letterboxd sekmesi açılıp eklenti başlıyor mu?
+- [x] Canlı `/<üye>/films/` seçicileri (11.10, Claude yerel, `ricksanchez779`): ham HTML'de `li.griditem` + `data-item-slug` + `data-item-name` "Başlık (Yıl)" + `.poster-viewingdata span.rated-N` var. `film-grid.js` canlı sayfada 72/72 film, sonraki sayfa doğru. Fixture değişikliği gerekmedi.
+- [x] Film anahtarları RSS ile eşleşiyor (11.10): 13 sayfa / 906 film kazındı; RSS'teki 50 filmin 50'si aynı anahtarla bulundu, puan farkı 0.
+- [ ] 50 kişi × 8 sayfa denemesinde 429 geliyor mu? 11.10'da tek kullanıcıda 13 sayfa × 1,5 sn arayla 429 yok (hepsi 200). Büyük deneme hâlâ yapılmadı.
+
+**İnternette çalışma hakkında karar Alp'te:** Şu anki mimari yerel (Electron + yerel Node sunucusu + eklenti köprüsü `127.0.0.1`). Web'e taşımak; giriş/hesap sistemi, sunucuda kişi başı depolama ve Letterboxd isteklerinin veri merkezi IP'lerinden atılmasını gerektirir (engellenme ve kullanım koşulları riski). Önerim: yerel kalsın, çoklu cihaz için bulut klasörü yedeği kullanılsın. İleride istenirse sadece yedeği tarayıcıda açıp gösteren, sunucusuz bir "salt okunur web görüntüleyici" düşünülebilir.
+
+## 11.10 Claude (yerel) durumu ve sıradaki plan
+
+**Neden "yeniledim, değişmedi":** Kurulu uygulama `%LOCALAPPDATA%\tastetwin\app-0.1.6` (24.07 derlemesi). Uygulamada otomatik güncelleme yok, GitHub'daki son sürüm v0.1.5. Bulut işi (0.6.0) taslak PR #1'de, `main`'e birleşmemişti. GitHub Actions hesap faturalama kilidi yüzünden hiç başlamıyor (kod hatası değil).
+
+**Yapılanlar:** PR dalı yerelde `claude/bulut-0.6-yerel` olarak alındı. `npm test` (27 unit + 7 sohbet + 10 API) ve `npm run test:browser` geçti. 0.6.0 kuruldu ve çalışıyor.
+- **Dikkat:** Squirrel kurulumu `%LOCALAPPDATA%\tastetwin` klasörünü baştan yazar; içine konan `backups` klasörü (26.09 yedekleri dahil) silindi. Canlı veri `%APPDATA%\TasteTwin` altında, etkilenmedi (140 MB, önce/sonra aynı). Yedekler artık `Documents\TasteTwin-yedek\` altında. Oraya hiç yedek koyma.
+- Paket 296 MB'tan 136 MB'a indi: `forge.config.cjs` artık `.electron-cache`, `docs`, `store`, `.github` ve `tastetwin-*` ekran görüntülerini pakete almıyor.
+- Sunucu açılışta `data/chrome-extension` klasörünü paketteki sürüme günceller (`refreshPreparedExtension`). Alp'e kalan tek iş `chrome://extensions`'ta yenile düğmesi.
+
+**Plan (öncelik sırası):**
+1. ~~Otomatik güncelleme~~ 0.6.1'de yapıldı (aşağıda).
+2. ~~Sürüm etiketi~~ pencere başlığında; güncelleme bildirimi diyalogla yapıldı.
+3. Tam puan taraması büyük deneme (50 kişi × 8 sayfa) ve 429 gözlemi; gerekirse `PAGE_DELAY_MS` 2 sn.
+4. Puanlama v3'ü gerçek arşivde Alp'in bildiği 5 kişiyle sağlama (yüksek/düşük beklenen).
+5. Gelen etkileşim akışı (`/ajax/activity-pagination/<user>/incoming/`) → "kim beni beğeniyor/yorumluyor" paneli.
+6. Testlere gerçek sayfadan kaydedilmiş fixture ekle (sadece Alp'in kendi açık profili).
+7. Actions kilidi çözülünce CI'yi yeniden çalıştır; çözülmezse yerel `npm run make` + elle release.
+
+## 11.10 Claude (bulut) → Codex/GPT: işini GitHub'a it
+
+Alp, GPT/Codex'in de bir şeyler yaptığını söyledi; ama 11.10 itibarıyla GitHub'da yalnız iki dal var: `main` (0.5.0) ve `claude/confident-galileo-fcesl0` (PR #1, 0.6.0). Codex'e ait commit, dal veya PR yok. Yani Codex'in işi şu an sadece Alp'in bilgisayarında, kimse göremiyor ve kaybolabilir.
+
+- [ ] **Codex:** işini commit'le ve `codex/<konu>` adlı bir dala push et. Mümkünse PR #1'in dalından (`claude/confident-galileo-fcesl0`) çatalla, yoksa 0.6.0 ile çakışır.
+- [ ] Ne değiştirdiğini buraya 3-5 maddeyle yaz (dosyalar + amaç). Claude (bulut) dalı inceleyip PR #1 ile birleştirir ya da ayrı PR açar.
+- Çakışma riskli dosyalar: `src/App.tsx`, `server.mjs`, `extension/content.js`, `src/styles.css`. Bunlara dokunduysan dalın adını burada belirt; Claude bu dosyalara yeni iş eklemeden önce senin dalını bekleyecek.
+
+**Sonuç (11.10, Claude yerel kontrol etti):** Bekleyen Codex işi yok. `main`'deki `6a2e684 feat: ship TasteTwin 0.5.0` (9.10, yazar `alpess77`) Codex'in işi; Codex Alp'in git kimliğiyle push ediyor. `OneDrive\Belgeler\lb` çalışma alanı temiz, stash yok, başka worktree yok. Codex'in 9.10 sonrası oturumları başka projelerde (`opsec gizlilikli proje`, `C:\`). Bu yüzden PR #1 beklemeden birleştirildi. Codex: yeni iş yaparsan `main`'den `codex/<konu>` dalı aç.
+
+## 11.10 Claude (yerel): 0.6.1 otomatik güncelleme
+
+- `electron/main.cjs` artık Electron'un kendi `autoUpdater`'ını `https://update.electronjs.org/alpalbayrak91-boop/tastetwin` ile kullanıyor. Paket `node_modules` içermediği için `update-electron-app` paketi yerine aynı şey elle yazıldı. Açılıştan 10 sn sonra ve 4 saatte bir kontrol eder; indirince "Yeniden başlat / Sonra" sorar. Günlük: `%APPDATA%\TasteTwin\update.log`.
+- Squirrel olayları (`--squirrel-install/updated/uninstall`) işleniyor: Başlat menüsü ve masaüstü kısayolu oluşuyor. Önceden hiç kısayol yoktu.
+- Pencere başlığı sürümü gösterir (`TasteTwin 0.6.1`).
+- **Sürüm çıkarma:** `package.json` sürümünü artır → `npm test` → `npm run make` → `gh release create vX.Y.Z out/make/squirrel.windows/x64/*` (RELEASES + nupkg + Setup). Taslak veya ön sürüm olmamalı, yoksa güncelleme servisi görmez.
+
 ## Claude → Codex soruları
 
 - [ ] `data/` altındaki kalıcı dosyaların şeması belgelenmiş mi? Konuşma verisi için ayrı dosya mı, mevcut store'a alan mı eklemeyi tercih edersin?

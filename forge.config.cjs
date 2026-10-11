@@ -5,7 +5,8 @@ module.exports = {
     executableName: "TasteTwin",
     ...(process.env.ELECTRON_ZIP_DIR ? { electronZipDir: process.env.ELECTRON_ZIP_DIR } : {}),
     ignore: [
-      /^\/(?:\.git|\.agents|\.codex[^/]*|data|out|src|scripts|tests|server|extension|public|node_modules)(?:\/|$)/,
+      /^\/(?:\.git|\.github|\.agents|\.codex[^/]*|\.electron-cache|data|docs|store|out|src|scripts|tests|server|extension|public|node_modules)(?:\/|$)/,
+      /^\/tastetwin-[^/]*$/,
       /^\/(?:index\.html|server\.mjs|start-tastetwin\.cmd|tsconfig.*|vite\.config\.ts|package-lock\.json)$/,
     ],
   },
